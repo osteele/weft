@@ -832,8 +832,24 @@ rule OnlineOnlyAdmissionContract {
             ensures: Job.exists(job)
 
         if not RemoteQueueAcknowledged(job) or PostRecordAdmissionLost(job):
-            ensures: Job.deleted(job)
-            ensures: AdmissionDecision() = not_accepted
+            if ExecutionEvidenceExists(job):
+                ensures: Job.exists(job)
+                ensures: not SafeFallbackReceiptEmitted()
+            else if ProvisionalJobCleanupSucceeded(job):
+                ensures: Job.deleted(job)
+                ensures: AdmissionDecision() = not_accepted
+            else:
+                ensures: not SafeFallbackReceiptEmitted()
+
+    if AdmissionDecision() = not_accepted:
+        ensures: ReceiptJobIDAbsent()
+        ensures: ReceiptAcceptedImmediately() = false
+        ensures: not ReceiptDeduplicated()
+        ensures: ReceiptRejectionCode() != ""
+        ensures: ReceiptRejectionDetailUTF8Bytes() <= 1024
+        ensures: ReceiptRejectionDetailValidUnicode()
+    else:
+        ensures: ReceiptRejectionAbsent()
 
     -- legacy annotation: @guidance
         -- `weft run --if-online` (`--no-queue` is an alias) is an admission
@@ -856,6 +872,24 @@ rule OnlineOnlyAdmissionContract {
         -- not_accepted result.
         -- Source pinning can precede admission and is not the Job record this
         -- cleanup removes.
+        --
+        -- The weft.run.receipt.v1 rejection object has required string fields
+        -- code and detail. Codes identify definitive refusal causes:
+        -- inventory_target_required, placement_evaluation_failed,
+        -- no_eligible_online_host, host_constraints_unsatisfied, host_offline,
+        -- admission_race_lost, immediate_dispatch_failed, and
+        -- dispatch_not_acknowledged. The final two distinguish a SyncHost
+        -- error from a return without acknowledgment, after safe cleanup.
+        -- detail preserves the existing human diagnostic up to 1024 UTF-8
+        -- bytes, truncating only between Unicode characters; stderr retains
+        -- the full diagnostic. Accepted paths do not construct rejection data.
+        --
+        -- The emitter validates the rejection and no-durable-job invariants
+        -- before writing any JSON. Consumers support older v1 receipts with
+        -- rejection absent and accept unknown nonempty codes. Present rejection
+        -- must be an object, never null, with both string fields and a bounded,
+        -- valid Unicode detail. A rejection on another decision is invalid.
+        -- Diagnostics never independently authorize fallback or change retries.
         --
         -- Retaining an unacknowledged local Job would let Weft's durable queue
         -- execute it after the caller had selected its own fallback, creating a

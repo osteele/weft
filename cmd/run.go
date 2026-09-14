@@ -174,6 +174,8 @@ const (
 
 var validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
 var pinRunSourceSnapshotFunc = pinRunSourceSnapshot
+var evaluateRunPlacementFunc = placement.Evaluate
+var syncRunHostFunc = ops.SyncHost
 
 type runPayloadDeclaration struct {
 	Name string
@@ -1315,14 +1317,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	requestedProvider, hasRequestedProvider := db.RequestedProvider(runTags)
 	if runIfOnline && (hasRequestedProvider || db.HasRentalTag(runTags) || db.IsLaunchHost(host)) {
+		err := fmt.Errorf("--if-online admits inventory hosts only; no job was created")
 		if runJSON {
 			_ = emitRunReceipt(cmd, runSubmissionReceipt{
 				PlacementDecision: "not_accepted",
 				SelectedHost:      host,
 				IdempotencyKey:    runIdempotencyKey,
+				Rejection:         newRunRejection("inventory_target_required", err),
 			})
 		}
-		return fmt.Errorf("--if-online admits inventory hosts only; no job was created")
+		return err
 	}
 	if hasRequestedProvider && host != "" && !db.IsLaunchHost(host) {
 		return fmt.Errorf("--provider=%s cannot be used with inventory host %q; omit --host to keep the job unplaced for rental launch", requestedProvider, host)
@@ -1579,7 +1583,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 					sources = []placement.CandidateSource{&placement.OnPremSource{}}
 				}
 				endPlacement := rec.Phase("placement", "evaluating placement")
-				plan, err := placement.Evaluate(placement.EvaluateRequest{
+				plan, err := evaluateRunPlacementFunc(placement.EvaluateRequest{
 					Constraints: placementConstraints,
 					Predictor:   predict,
 					Sources:     sources,
@@ -1592,6 +1596,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 							PlacementDecision: "not_accepted",
 							SourcePin:         sourcePinFromMetadata(sourceMeta),
 							IdempotencyKey:    runIdempotencyKey,
+							Rejection:         newRunRejection("placement_evaluation_failed", err),
 						})
 					}
 					return err
@@ -1618,39 +1623,45 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if runIfOnline {
 			if host == "" {
+				err := fmt.Errorf("no eligible inventory host is online; no job was created")
 				if runJSON {
 					_ = emitRunReceipt(cmd, runSubmissionReceipt{
 						PlacementDecision: "not_accepted",
 						SourcePin:         sourcePinFromMetadata(sourceMeta),
 						IdempotencyKey:    runIdempotencyKey,
+						Rejection:         newRunRejection("no_eligible_online_host", err),
 					})
 				}
-				return fmt.Errorf("no eligible inventory host is online; no job was created")
+				return err
 			}
 			if spec := inventory.FindHost(host); spec != nil {
 				verdict := placement.CheckHostConstraintsWithActiveJobs(database, *spec, placementConstraints)
 				if !verdict.Eligible {
+					err := fmt.Errorf("host %s cannot accept the job: %s; no job was created", host, strings.Join(verdict.Messages(), "; "))
 					if runJSON {
 						_ = emitRunReceipt(cmd, runSubmissionReceipt{
 							PlacementDecision: "not_accepted",
 							SelectedHost:      host,
 							SourcePin:         sourcePinFromMetadata(sourceMeta),
 							IdempotencyKey:    runIdempotencyKey,
+							Rejection:         newRunRejection("host_constraints_unsatisfied", err),
 						})
 					}
-					return fmt.Errorf("host %s cannot accept the job: %s; no job was created", host, strings.Join(verdict.Messages(), "; "))
+					return err
 				}
 			}
 			if !placement.ProbeHosts([]string{host}, 5*time.Second)[host] {
+				err := fmt.Errorf("host %s is offline; no job was created", host)
 				if runJSON {
 					_ = emitRunReceipt(cmd, runSubmissionReceipt{
 						PlacementDecision: "not_accepted",
 						SelectedHost:      host,
 						SourcePin:         sourcePinFromMetadata(sourceMeta),
 						IdempotencyKey:    runIdempotencyKey,
+						Rejection:         newRunRejection("host_offline", err),
 					})
 				}
-				return fmt.Errorf("host %s is offline; no job was created", host)
+				return err
 			}
 		}
 
@@ -1710,19 +1721,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 					if deleteErr := db.DeleteQueuedJobIfNeverStarted(database, jobID); deleteErr != nil {
 						return fmt.Errorf("capability admission failed and cleanup of %s failed: %v", ids.FormatJobID(jobID), deleteErr)
 					}
+					err := fmt.Errorf("host %s lost the admission race: %s; no job was created", host, strings.Join(verdict.Messages(), "; "))
 					if runJSON {
 						_ = emitRunReceipt(cmd, runSubmissionReceipt{
 							PlacementDecision: "not_accepted",
 							SelectedHost:      host,
 							SourcePin:         sourcePinFromMetadata(sourceMeta),
 							IdempotencyKey:    runIdempotencyKey,
+							Rejection:         newRunRejection("admission_race_lost", err),
 						})
 					}
-					return fmt.Errorf("host %s lost the admission race: %s; no job was created", host, strings.Join(verdict.Messages(), "; "))
+					return err
 				}
 			}
 			endSync := rec.Phase("sync", fmt.Sprintf("dispatching immediately to %s", host))
-			syncResult, syncErr := ops.SyncHost(database, host, ops.HostSyncOptions{
+			syncResult, syncErr := syncRunHostFunc(database, host, ops.HostSyncOptions{
 				Timeout: 10 * time.Second,
 				Logger:  ops.NewSilentSyncLogger(),
 			}, func(h string) (bool, error) {
@@ -1742,18 +1755,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 				}
 			}
 			if !accepted {
+				code := "dispatch_not_acknowledged"
+				var err error
+				if syncErr != nil {
+					code = "immediate_dispatch_failed"
+					err = fmt.Errorf("immediate dispatch to %s failed; no job was created: %w", host, syncErr)
+				} else {
+					err = fmt.Errorf("immediate dispatch to %s was not acknowledged; no job was created (contacted=%t)", host, syncResult.HostContacted)
+				}
 				if runJSON {
 					_ = emitRunReceipt(cmd, runSubmissionReceipt{
 						PlacementDecision: "not_accepted",
 						SelectedHost:      host,
 						SourcePin:         sourcePinFromMetadata(sourceMeta),
 						IdempotencyKey:    runIdempotencyKey,
+						Rejection:         newRunRejection(code, err),
 					})
 				}
-				if syncErr != nil {
-					return fmt.Errorf("immediate dispatch to %s failed; no job was created: %w", host, syncErr)
-				}
-				return fmt.Errorf("immediate dispatch to %s was not acknowledged; no job was created (contacted=%t)", host, syncResult.HostContacted)
+				return err
 			}
 			ensureDaemonForWork(os.Stderr)
 			if runJSON {

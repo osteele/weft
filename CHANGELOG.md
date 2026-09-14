@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Structured admission rejections**: Online-only JSON receipts include stable
+  refusal codes and UTF-8 diagnostics bounded to 1,024 bytes. The v1 receipt
+  contract preserves its existing no-job fallback guarantee.
+
 ### Changed
 
 - **`host agent-status --json` evidence**: Schema version 2 reports the desired

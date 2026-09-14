@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,11 +15,13 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
 )
@@ -1629,5 +1632,174 @@ func TestValidateSetupPolicy(t *testing.T) {
 	err := validateSetupPolicy("uv sync")
 	if err == nil || !strings.Contains(err.Error(), "--setup") {
 		t.Fatalf("validateSetupPolicy(uv sync) = %v, want --setup error", err)
+	}
+}
+
+func TestRunRunOnlineOnlyRejectionReceipts(t *testing.T) {
+	for _, outcome := range []string{
+		"inventory_target_required", "placement_evaluation_failed", "no_eligible_online_host",
+		"host_constraints_unsatisfied", "host_offline", "admission_race_lost",
+		"immediate_dispatch_failed", "dispatch_not_acknowledged",
+		"started", "cleanup_failed", "admission_cleanup_failed", "acknowledged", "deduplicated",
+	} {
+		t.Run(outcome, func(t *testing.T) {
+			database := db.SetupTestDB(t)
+			resetRunGlobals(t)
+			runDir = t.TempDir()
+			runHost = "host-alpha"
+			runIfOnline, runJSON = true, true
+			runAgent = "codex"
+			runIdempotencyKey = "receipt-contract"
+			t.Cleanup(func() {
+				runIfOnline, runJSON = false, false
+				runAgent, runIdempotencyKey = "", ""
+				runCapabilities = nil
+			})
+			host := inventory.HostSpec{
+				Name: "host-alpha", CPUCores: 8, Memory: "32GB",
+				Capabilities: []string{"agent:codex"}, AgentConcurrency: map[string]int{"codex": 1},
+			}
+			t.Cleanup(inventory.SetHosts([]inventory.HostSpec{host}))
+			t.Cleanup(ssh.SetRunner(func(_, _ string) (string, string, error) {
+				if outcome == "host_offline" {
+					return "", "", errors.New("offline")
+				}
+				return "", "", nil
+			}))
+			oldEvaluate, oldSync, oldRecord, oldEnsure := evaluateRunPlacementFunc, syncRunHostFunc, recordQueuedJobMutationFunc, ensureDaemonStartedFunc
+			t.Cleanup(func() {
+				evaluateRunPlacementFunc, syncRunHostFunc, recordQueuedJobMutationFunc, ensureDaemonStartedFunc = oldEvaluate, oldSync, oldRecord, oldEnsure
+			})
+			ensureDaemonStartedFunc = func(daemoncontrol.Paths, time.Duration) (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+				return daemoncontrol.Status{Live: true}, daemoncontrol.EnsureNoop, nil
+			}
+			evaluateRunPlacementFunc = func(placement.EvaluateRequest) (*placement.PlacementPlan, error) {
+				if outcome == "placement_evaluation_failed" {
+					return nil, errors.New("placement inventory unavailable")
+				}
+				return &placement.PlacementPlan{Unplaced: true}, nil
+			}
+			recordOccupant := func(database *sql.DB) {
+				t.Helper()
+				id, err := db.RecordQueued(database, host.Name, "/tmp/occupant", "true", "occupant")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.SetJobMetadata(database, id, &db.JobMetadata{Agent: &db.JobAgentMetadata{RequiredCapabilities: []string{"agent:codex"}}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			blockCleanup := func(database *sql.DB) {
+				t.Helper()
+				if _, err := database.Exec(`CREATE TRIGGER block_receipt_cleanup BEFORE DELETE ON jobs BEGIN SELECT RAISE(ABORT, 'cleanup blocked'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var submittedID int64
+			recordQueuedJobMutationFunc = func(ctx context.Context, database *sql.DB, params ops.QueueJobParams) (int64, error) {
+				if outcome == "admission_race_lost" || outcome == "admission_cleanup_failed" {
+					recordOccupant(database)
+					if outcome == "admission_cleanup_failed" {
+						blockCleanup(database)
+					}
+				}
+				id, err := ops.RecordQueuedJob(database, params)
+				submittedID = id
+				return id, err
+			}
+			syncRunHostFunc = func(database *sql.DB, _ string, _ ops.HostSyncOptions, _ ops.EnsureQueueRunnerFunc) (ops.HostSyncResult, error) {
+				switch outcome {
+				case "started":
+					if _, err := database.Exec(`UPDATE job_attempts SET status = 'running', start_time = 1 WHERE job_id = ?`, submittedID); err != nil {
+						t.Fatal(err)
+					}
+				case "acknowledged":
+					if err := db.UpdateLastSyncedStatus(database, submittedID, db.StatusQueued); err != nil {
+						t.Fatal(err)
+					}
+				case "cleanup_failed":
+					blockCleanup(database)
+				case "dispatch_not_acknowledged":
+					return ops.HostSyncResult{HostContacted: true}, nil
+				}
+				return ops.HostSyncResult{}, errors.New("dispatch transport unavailable")
+			}
+			switch outcome {
+			case "inventory_target_required":
+				runHost = ""
+				runTags = []string{db.TagRental}
+			case "placement_evaluation_failed", "no_eligible_online_host":
+				runHost = ""
+			case "host_constraints_unsatisfied":
+				recordOccupant(database)
+			}
+			database.Close()
+			cmd := newRunTestCommand()
+			var out, stderr bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&stderr)
+			if outcome == "deduplicated" {
+				syncRunHostFunc = func(database *sql.DB, _ string, _ ops.HostSyncOptions, _ ops.EnsureQueueRunnerFunc) (ops.HostSyncResult, error) {
+					err := db.UpdateLastSyncedStatus(database, submittedID, db.StatusQueued)
+					return ops.HostSyncResult{HostContacted: true}, err
+				}
+				if err := runRun(cmd, []string{"echo receipt"}); err != nil {
+					t.Fatalf("initial admission: %v", err)
+				}
+				out.Reset()
+			}
+			err := runRun(cmd, []string{"echo receipt"})
+			accepted := outcome == "started" || outcome == "acknowledged" || outcome == "deduplicated"
+			if (err == nil) != accepted {
+				t.Fatalf("runRun error = %v, accepted = %t; stdout=%s stderr=%s", err, accepted, &out, &stderr)
+			}
+			readDB, openErr := db.Open()
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			defer readDB.Close()
+			if outcome == "cleanup_failed" || outcome == "admission_cleanup_failed" {
+				if out.Len() != 0 {
+					t.Fatalf("cleanup ambiguity emitted a receipt: %s", &out)
+				}
+				if _, err := db.GetJobByID(readDB, submittedID); err != nil {
+					t.Fatalf("cleanup failure lost provisional job: %v", err)
+				}
+				return
+			}
+			var receipt runSubmissionReceipt
+			if decodeErr := json.Unmarshal(out.Bytes(), &receipt); decodeErr != nil {
+				t.Fatalf("receipt JSON: %v; run error=%v; stdout=%s", decodeErr, err, &out)
+			}
+			if accepted {
+				wantDecision := "accepted_immediately"
+				if outcome == "deduplicated" {
+					wantDecision = "deduplicated"
+				}
+				if receipt.PlacementDecision != wantDecision || receipt.Rejection != nil || receipt.JobID == "" {
+					t.Fatalf("accepted receipt = %+v", receipt)
+				}
+				if _, err := db.GetJobByID(readDB, submittedID); err != nil {
+					t.Fatalf("accepted job missing: %v", err)
+				}
+				return
+			}
+			if receipt.APIVersion != runReceiptAPIVersion || receipt.PlacementDecision != "not_accepted" || receipt.JobID != "" || receipt.AcceptedImmediately || receipt.Deduplicated {
+				t.Fatalf("unsafe refusal: %+v", receipt)
+			}
+			if receipt.Rejection == nil || receipt.Rejection.Code != outcome || receipt.Rejection.Detail != err.Error() {
+				t.Fatalf("rejection = %+v, error = %v", receipt.Rejection, err)
+			}
+			if receipt.IdempotencyKey != "receipt-contract" || (outcome != "inventory_target_required" && receipt.SourcePin == "") {
+				t.Fatalf("refusal lost submission identity: %+v", receipt)
+			}
+			var count int
+			if err := readDB.QueryRow(`SELECT COUNT(*) FROM jobs WHERE command = 'echo receipt'`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("safe refusal left %d durable jobs", count)
+			}
+		})
 	}
 }

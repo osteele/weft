@@ -3,7 +3,9 @@ package cmd
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostcap"
@@ -12,6 +14,7 @@ import (
 )
 
 const runReceiptAPIVersion = "weft.run.receipt.v1"
+const runRejectionDetailMaxBytes = 1024
 
 type runSubmissionReceipt struct {
 	APIVersion          string                         `json:"api_version"`
@@ -25,6 +28,7 @@ type runSubmissionReceipt struct {
 	Deduplicated        bool                           `json:"deduplicated,omitempty"`
 	IdempotencyKey      string                         `json:"idempotency_key,omitempty"`
 	Payloads            []runPayloadReceipt            `json:"payloads,omitempty"`
+	Rejection           *runRejection                  `json:"rejection,omitempty"`
 }
 
 type runPayloadReceipt struct {
@@ -33,7 +37,38 @@ type runPayloadReceipt struct {
 	SHA256    string `json:"sha256"`
 }
 
+type runRejection struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+}
+
+func newRunRejection(code string, err error) *runRejection {
+	detail := strings.ToValidUTF8(err.Error(), "\uFFFD")
+	if len(detail) > runRejectionDetailMaxBytes {
+		end := runRejectionDetailMaxBytes
+		for !utf8.RuneStart(detail[end]) {
+			end--
+		}
+		detail = detail[:end]
+	}
+	return &runRejection{Code: code, Detail: detail}
+}
+
 func emitRunReceipt(cmd *cobra.Command, receipt runSubmissionReceipt) error {
+	if receipt.PlacementDecision == "not_accepted" && (receipt.JobID != "" || receipt.AcceptedImmediately || receipt.Deduplicated) {
+		return fmt.Errorf("invalid run receipt: not_accepted cannot identify an accepted or durable job")
+	}
+	if rejection := receipt.Rejection; rejection != nil {
+		if receipt.PlacementDecision != "not_accepted" {
+			return fmt.Errorf("invalid run receipt: rejection requires not_accepted")
+		}
+		if rejection.Code == "" || !utf8.ValidString(rejection.Code) {
+			return fmt.Errorf("invalid run receipt: rejection code must be nonempty valid UTF-8")
+		}
+		if !utf8.ValidString(rejection.Detail) || len(rejection.Detail) > runRejectionDetailMaxBytes {
+			return fmt.Errorf("invalid run receipt: rejection detail must be valid UTF-8 and at most %d bytes", runRejectionDetailMaxBytes)
+		}
+	}
 	receipt.APIVersion = runReceiptAPIVersion
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(receipt)
 }

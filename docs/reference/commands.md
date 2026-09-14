@@ -116,6 +116,37 @@ immediately.
 
 Use `start <job-id>` to start a queued job immediately.
 
+`weft run --if-online --json` (alias `--no-queue`) submits to an online inventory
+host and prints a `weft.run.receipt.v1` receipt. Fallback callers may proceed only
+on `placement_decision: "not_accepted"` with no `job_id`,
+`accepted_immediately: false`, and `deduplicated` absent or false. This means
+admission was refused before recording a job, or the provisional job was
+successfully removed. `accepted_immediately` and `deduplicated` retain durable
+work and do not authorize fallback. A nonzero exit, missing receipt, or cleanup
+error alone does not authorize fallback.
+
+Refusal receipts include an optional `rejection` object with required string
+fields `code` and `detail`. The code is stable; detail is a human diagnostic,
+limited to 1024 UTF-8 bytes at a Unicode character boundary. Full diagnostics
+remain on stderr. Accepted and deduplicated receipts omit `rejection`.
+
+| Rejection code | Cause |
+| --- | --- |
+| `inventory_target_required` | The requested target requires a rental rather than inventory admission. |
+| `placement_evaluation_failed` | Live placement evaluation failed. |
+| `no_eligible_online_host` | Placement found no eligible online inventory host. |
+| `host_constraints_unsatisfied` | The selected host cannot satisfy admission constraints. |
+| `host_offline` | The selected host failed the reachability probe. |
+| `admission_race_lost` | A post-record admission check lost capacity; the provisional job was removed. |
+| `immediate_dispatch_failed` | Immediate dispatch returned an error; the provisional job was removed. |
+| `dispatch_not_acknowledged` | Dispatch returned without queue acknowledgment; the provisional job was removed. |
+
+Older v1 publishers may omit `rejection`. Consumers accept unknown nonempty
+codes for forward compatibility, but reject malformed objects (including
+`null`), invalid field types, oversized detail, or rejection combined with any
+decision other than `not_accepted`. Neither a code nor its detail grants
+fallback authority independently of the receipt's admission state.
+
 **Flags:**
 - `-i, --immediate`: Start job immediately instead of queuing
 - `-C, --directory DIR`: Working directory (default: current directory path)
