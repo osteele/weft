@@ -105,8 +105,9 @@ const (
 	// "<stage>: <truncated err>" string suitable for surfacing as a job's
 	// QueueBlockedReason. EventQueueDispatchOK clears prior failures by
 	// providing a fresher floor for the hydrator query.
-	EventQueueDispatchFailed = "queue.dispatch.failed"
-	EventQueueDispatchOK     = "queue.dispatch.ok"
+	EventQueueDispatchFailed         = "queue.dispatch.failed"
+	EventQueueDispatchOK             = "queue.dispatch.ok"
+	EventQueueDispatchNotProgressing = "queue.dispatch.not_progressing"
 	// EventQueueDispatchDeferred records a *non-failure* skip during a
 	// dispatch attempt — typically an ssh.IsConnectionError from a stage
 	// the dispatcher returns early on. Without this, the latest visible
@@ -442,6 +443,7 @@ func CountJobDispatchFailuresMatching(database *sql.DB, jobID int64, detailPrefi
 // internal/explain (diagnose surface) and internal/ops (dispatch backoff
 // gate) so this query lives in exactly one place.
 type DispatchRun struct {
+	FirstEventID    int64 // distinguishes runs even when timestamps share a second
 	Kind            string
 	Detail          string
 	OccurredAt      time.Time // most recent event in the run (attempt clock)
@@ -503,7 +505,7 @@ func latestDispatchRun(database *sql.DB, jobID int64, floor int64, now time.Time
 		floorClause = "\n\t\t  AND occurred_at >= ?"
 		args = append(args, floor)
 	}
-	rows, err := database.Query(fmt.Sprintf(`SELECT occurred_at, event_kind, COALESCE(detail, '')
+	rows, err := database.Query(fmt.Sprintf(`SELECT id, occurred_at, event_kind, COALESCE(detail, '')
 		FROM lifecycle_events
 		WHERE job_id = ?
 		  AND event_kind IN (%s)%s
@@ -518,16 +520,22 @@ func latestDispatchRun(database *sql.DB, jobID int64, floor int64, now time.Time
 	closed := false
 	var latestOK int64
 	for rows.Next() {
+		var eventID int64
 		var occurredAt int64
 		var kind string
 		var detail string
-		if err := rows.Scan(&occurredAt, &kind, &detail); err != nil {
+		if err := rows.Scan(&eventID, &occurredAt, &kind, &detail); err != nil {
 			continue
 		}
 		if floor > 0 && occurredAt < floor {
 			continue
 		}
 		if kind == EventQueueDispatchOK {
+			// The attempt clock always resets at OK. The display clock keeps
+			// its legacy exception for runner-side source fetch failures.
+			if len(blockKinds) == 1 {
+				break
+			}
 			if latestOK == 0 || occurredAt > latestOK {
 				latestOK = occurredAt
 			}
@@ -548,6 +556,7 @@ func latestDispatchRun(database *sql.DB, jobID int64, floor int64, now time.Time
 		}
 		if run.Detail == "" {
 			run = DispatchRun{
+				FirstEventID:    eventID,
 				Kind:            kind,
 				Detail:          detail,
 				OccurredAt:      time.Unix(occurredAt, 0),
@@ -557,6 +566,7 @@ func latestDispatchRun(database *sql.DB, jobID int64, floor int64, now time.Time
 			continue
 		}
 		if detail == run.Detail {
+			run.FirstEventID = eventID
 			run.FirstOccurredAt = time.Unix(occurredAt, 0)
 			run.RetryCount++
 		} else {

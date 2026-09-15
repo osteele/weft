@@ -2,9 +2,11 @@ package ops
 
 import (
 	"database/sql"
+	"log/slog"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/notify"
 )
 
 // Dispatch backoff for queued jobs whose remote dispatch keeps failing
@@ -45,6 +47,28 @@ const dispatchBackoffMinDelay = time.Minute
 // in internal/orchestration/dispatch_test.go (which can see both packages)
 // asserts they cannot drift apart.
 const DispatchBackoffCap = 10 * time.Minute
+
+// DispatchNotProgressingAfter is the unchanged dispatch-run age that warrants
+// a user-visible blocker and a once-per-run notification.
+const DispatchNotProgressingAfter = time.Hour
+
+func signalDispatchNotProgressing(database *sql.DB, job *db.Job, now time.Time) {
+	if database == nil || job == nil || !job.HasInventoryHost() || job.EffectiveStatus() != db.StatusQueued {
+		return
+	}
+	run, ok := db.LatestDispatchAttemptRun(database, job.ID, db.DispatchRunFloor(job), now)
+	if !ok || now.Sub(run.FirstOccurredAt) <= DispatchNotProgressingAfter {
+		return
+	}
+	inserted, err := db.RecordDispatchNotProgressing(database, job, run, now)
+	if err != nil {
+		slog.Warn("record dispatch not progressing", "job_id", job.ID, "error", err)
+		return
+	}
+	if inserted {
+		notify.DispatchNotProgressing(database, job.ID)
+	}
+}
 
 // dispatchBackoffBaseDelay implements the un-jittered schedule.
 func dispatchBackoffBaseDelay(age time.Duration) time.Duration {

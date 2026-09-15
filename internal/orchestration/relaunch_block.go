@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
 )
 
@@ -42,6 +43,11 @@ func HydrateInventoryDispatchBlockedReasons(database *sql.DB, jobs []*db.Job) {
 			continue
 		}
 		if !job.HasInventoryHost() || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		now := time.Now()
+		if run, ok := db.LatestDispatchAttemptRun(database, job.ID, db.DispatchRunFloor(job), now); ok && now.Sub(run.FirstOccurredAt) > ops.DispatchNotProgressingAfter {
+			job.QueueBlockedReason = "not progressing: " + run.Detail
 			continue
 		}
 		if strings.TrimSpace(job.QueueBlockedReason) != "" {

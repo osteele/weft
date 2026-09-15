@@ -1022,6 +1022,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			continue
 		}
 		remaining, inBackoff := dispatchBackoffRemaining(database, job, now)
+		signalDispatchNotProgressing(database, job, now)
 		if !inBackoff {
 			continue
 		}

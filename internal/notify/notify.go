@@ -30,6 +30,17 @@ import (
 // sync. Local delivery (agent-mail) completes in well under a second.
 const commandTimeout = 10 * time.Second
 
+// DispatchNotProgressing drains the structured hook outbox after the dispatch
+// detector commits its once-per-run event. Legacy hooks remain terminal-only.
+func DispatchNotProgressing(database *sql.DB, jobID int64) {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Warn("notify: load config", "component", "notify", "job_id", jobID, "error", err)
+		return
+	}
+	dispatchLifecycleEvents(database, cfg, jobID)
+}
+
 // JobTerminal drains the durable lifecycle-event outbox after a caller has
 // committed a terminal job transition. The transition itself creates the event
 // through the database trigger; finalStatus and exitCode remain in the signature
