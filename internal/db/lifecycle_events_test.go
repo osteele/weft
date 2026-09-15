@@ -1,6 +1,7 @@
 package db
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -272,6 +273,158 @@ func TestInsertLifecycleEventDedup(t *testing.T) {
 	}
 }
 
+// TestLatestDispatchAttemptRunChangedDetailRestartsRun verifies the run
+// definition Change 1 shares between internal/explain and internal/ops's
+// dispatch backoff gate: a changed failure detail starts a new run,
+// discarding the older detail's accumulated RetryCount/FirstOccurredAt.
+func TestLatestDispatchAttemptRunChangedDetailRestartsRun(t *testing.T) {
+	database := SetupTestDB(t)
+	const jobID = int64(910)
+	base := time.Unix(1_000_000, 0)
+
+	for _, at := range []time.Time{base, base.Add(time.Minute), base.Add(2 * time.Minute)} {
+		if err := InsertLifecycleEvent(database, &LifecycleEvent{
+			OccurredAt: at.Unix(),
+			EventKind:  EventQueueDispatchFailed,
+			JobID:      jobID,
+			Detail:     "artifact needs staging failed: boom",
+		}); err != nil {
+			t.Fatalf("insert failure: %v", err)
+		}
+	}
+	// A different detail after the run is the freshest event and must
+	// close the older run rather than extend it.
+	changedAt := base.Add(3 * time.Minute)
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{
+		OccurredAt: changedAt.Unix(),
+		EventKind:  EventQueueDispatchFailed,
+		JobID:      jobID,
+		Detail:     "source sync failed: different reason",
+	}); err != nil {
+		t.Fatalf("insert changed-detail failure: %v", err)
+	}
+
+	now := base.Add(4 * time.Minute)
+	run, ok := LatestDispatchAttemptRun(database, jobID, 0, now)
+	if !ok {
+		t.Fatal("LatestDispatchAttemptRun ok = false, want true")
+	}
+	if run.Detail != "source sync failed: different reason" {
+		t.Fatalf("Detail = %q, want the fresh detail", run.Detail)
+	}
+	if run.RetryCount != 1 {
+		t.Fatalf("RetryCount = %d, want 1 (new run, not extended)", run.RetryCount)
+	}
+	if !run.FirstOccurredAt.Equal(changedAt) {
+		t.Fatalf("FirstOccurredAt = %v, want %v (run start, not the older detail's)", run.FirstOccurredAt, changedAt)
+	}
+}
+
+// TestLatestDispatchAttemptRunOKEndsRun verifies an EventQueueDispatchOK
+// terminates the run: failures before it are invisible to a later query.
+func TestLatestDispatchAttemptRunOKEndsRun(t *testing.T) {
+	database := SetupTestDB(t)
+	const jobID = int64(911)
+	base := time.Unix(1_000_000, 0)
+
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{
+		OccurredAt: base.Unix(),
+		EventKind:  EventQueueDispatchFailed,
+		JobID:      jobID,
+		Detail:     "artifact needs staging failed: boom",
+	}); err != nil {
+		t.Fatalf("insert failure: %v", err)
+	}
+	okAt := base.Add(time.Minute)
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{
+		OccurredAt: okAt.Unix(),
+		EventKind:  EventQueueDispatchOK,
+		JobID:      jobID,
+	}); err != nil {
+		t.Fatalf("insert ok: %v", err)
+	}
+
+	if _, ok := LatestDispatchAttemptRun(database, jobID, 0, okAt.Add(time.Minute)); ok {
+		t.Fatal("LatestDispatchAttemptRun ok = true, want false after a dispatch OK")
+	}
+
+	// A fresh failure after the OK starts a new run rather than resuming
+	// the pre-OK one.
+	freshAt := okAt.Add(2 * time.Minute)
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{
+		OccurredAt: freshAt.Unix(),
+		EventKind:  EventQueueDispatchFailed,
+		JobID:      jobID,
+		Detail:     "artifact needs staging failed: boom",
+	}); err != nil {
+		t.Fatalf("insert post-ok failure: %v", err)
+	}
+	run, ok := LatestDispatchAttemptRun(database, jobID, 0, freshAt.Add(time.Minute))
+	if !ok {
+		t.Fatal("LatestDispatchAttemptRun ok = false, want true after fresh post-OK failure")
+	}
+	if run.RetryCount != 1 {
+		t.Fatalf("RetryCount = %d, want 1 (pre-OK failure must not count)", run.RetryCount)
+	}
+	if !run.FirstOccurredAt.Equal(freshAt) {
+		t.Fatalf("FirstOccurredAt = %v, want %v", run.FirstOccurredAt, freshAt)
+	}
+}
+
+// TestLatestDispatchAttemptRunIgnoresDeferred verifies the property
+// LatestDispatchAttemptRun's doc comment relies on: an
+// EventQueueDispatchDeferred row with a different, per-pass-varying detail
+// (the shape the dispatch backoff gate itself emits while skipping) must not
+// perturb the failure run. If Deferred participated the same way it does in
+// LatestDispatchDisplayRun, this fresher, differently-worded row would mask
+// the real failure chain and collapse FirstOccurredAt back to "now" on every
+// check — silently disabling the backoff ramp.
+func TestLatestDispatchAttemptRunIgnoresDeferred(t *testing.T) {
+	database := SetupTestDB(t)
+	const jobID = int64(912)
+	base := time.Unix(1_000_000, 0)
+
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{
+		OccurredAt: base.Unix(),
+		EventKind:  EventQueueDispatchFailed,
+		JobID:      jobID,
+		Detail:     "artifact needs staging failed: boom",
+	}); err != nil {
+		t.Fatalf("insert failure: %v", err)
+	}
+	deferredAt := base.Add(6 * time.Minute)
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{
+		OccurredAt: deferredAt.Unix(),
+		EventKind:  EventQueueDispatchDeferred,
+		JobID:      jobID,
+		Detail:     "dispatch backoff: retrying in 1m30s",
+	}); err != nil {
+		t.Fatalf("insert deferred: %v", err)
+	}
+
+	now := deferredAt.Add(time.Minute)
+	run, ok := LatestDispatchAttemptRun(database, jobID, 0, now)
+	if !ok {
+		t.Fatal("LatestDispatchAttemptRun ok = false, want true")
+	}
+	if run.Detail != "artifact needs staging failed: boom" {
+		t.Fatalf("Detail = %q, want the original failure detail (deferred must not mask it)", run.Detail)
+	}
+	if !run.FirstOccurredAt.Equal(base) {
+		t.Fatalf("FirstOccurredAt = %v, want %v (must not reset to the deferred event's time)", run.FirstOccurredAt, base)
+	}
+
+	// The display run, by contrast, does let the fresher deferred mask the
+	// older failure — this is the existing behavior explain.go depends on.
+	displayRun, ok := LatestDispatchDisplayRun(database, jobID, 0, now)
+	if !ok {
+		t.Fatal("LatestDispatchDisplayRun ok = false, want true")
+	}
+	if displayRun.Detail != "dispatch backoff: retrying in 1m30s" {
+		t.Fatalf("display Detail = %q, want the fresher deferred detail", displayRun.Detail)
+	}
+}
+
 func TestCheckpointAutoPublishAttemptedWithinCooldown(t *testing.T) {
 	database := SetupTestDB(t)
 	const (
@@ -366,3 +519,42 @@ func TestCountActiveSourceSyncTimeoutHosts(t *testing.T) {
 // package owns the production constant, this keeps the db-level test self
 // contained without importing ops (which would be an import cycle).
 const simultaneousWedgeWindowForTest = 10 * time.Minute
+
+// The dispatch-run query runs once per queued job on every wake-snapshot read,
+// so it must resolve through idx_le_job_kind_occurred rather than degrade to a
+// scan of every dispatch event for every job. Without that index SQLite falls
+// back to idx_le_kind (event_kind=?) and filters job_id afterward, which is the
+// per-pass cost the dispatch backoff exists to remove. Guard the plan, not just
+// the result.
+func TestLatestDispatchRunQueryUsesJobIndex(t *testing.T) {
+	database := SetupTestDB(t)
+	rows, err := database.Query(`EXPLAIN QUERY PLAN
+		SELECT occurred_at, event_kind, COALESCE(detail, '')
+		FROM lifecycle_events
+		WHERE job_id = ?
+		  AND event_kind IN (?, ?)
+		  AND occurred_at >= ?
+		ORDER BY occurred_at DESC, id DESC`,
+		1, EventQueueDispatchOK, EventQueueDispatchFailed, 0)
+	if err != nil {
+		t.Fatalf("explain query plan: %v", err)
+	}
+	defer rows.Close()
+	planned := false
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatalf("scan plan row: %v", err)
+		}
+		plan = append(plan, detail)
+		if strings.Contains(detail, "idx_le_job_kind_occurred") {
+			planned = true
+		}
+	}
+	if !planned {
+		t.Fatalf("dispatch-run query does not use idx_le_job_kind_occurred; plan was:\n  %s",
+			strings.Join(plan, "\n  "))
+	}
+}

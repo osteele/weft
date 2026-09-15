@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/retrypolicy"
 )
 
@@ -421,6 +422,91 @@ func TestReadWakeSnapshot(t *testing.T) {
 	}
 	if afterIntents.OpenMoveIntents != afterLaunch.OpenMoveIntents+1 {
 		t.Fatalf("OpenMoveIntents = %d, want %d", afterIntents.OpenMoveIntents, afterLaunch.OpenMoveIntents+1)
+	}
+}
+
+// TestDispatchBackoffCapMatchesQuietBackstop is the cross-package assertion
+// the ops package's DispatchBackoffCap doc comment promises: internal/ops
+// cannot import internal/orchestration (internal/orchestration already
+// imports internal/ops, so the reverse would cycle — confirmed by `go list
+// -deps`), so the two backoff-cap constants are declared independently and
+// this test, which can see both packages, is what keeps them from drifting
+// apart. The invariant: no queued job's dispatch backoff should outlive the
+// system's own promise to take a fresh look (AutopilotQuietBackstop).
+func TestDispatchBackoffCapMatchesQuietBackstop(t *testing.T) {
+	if ops.DispatchBackoffCap != AutopilotQuietBackstop {
+		t.Fatalf("ops.DispatchBackoffCap = %s, want it to equal orchestration.AutopilotQuietBackstop = %s", ops.DispatchBackoffCap, AutopilotQuietBackstop)
+	}
+}
+
+// TestReadWakeSnapshot_DispatchBackoffExcludedFromQuiet is the case the
+// brief calls out explicitly: one queued job, permanently failing dispatch,
+// nothing else — Quiet() must be true so the daemon relaxes to
+// daemonQuietSyncInterval instead of running a full pre-pass sync every
+// 30-90s forever. It also checks the inverse: once the job's backoff window
+// has elapsed, it counts as work in flight again and Quiet() is false.
+func TestReadWakeSnapshot_DispatchBackoffExcludedFromQuiet(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", t.TempDir(), "python train.py", "wj8147-like", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	now := time.Now()
+	runStart := now.Add(-6 * time.Minute)
+	lastAttempt := now.Add(-5 * time.Second)
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, runStart.Unix(), jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+	for _, at := range []time.Time{runStart, lastAttempt} {
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			OccurredAt: at.Unix(),
+			EventKind:  db.EventQueueDispatchFailed,
+			JobID:      jobID,
+			Detail:     "artifact needs staging failed: R2-pull inventory hosts do not yet stage producer-job --needs artifacts",
+		}); err != nil {
+			t.Fatalf("seed failure at %v: %v", at, err)
+		}
+	}
+
+	snap, err := ReadWakeSnapshot(database)
+	if err != nil {
+		t.Fatalf("ReadWakeSnapshot: %v", err)
+	}
+	if snap.ActiveJobs != 1 {
+		t.Fatalf("ActiveJobs = %d, want 1", snap.ActiveJobs)
+	}
+	if snap.DispatchBackoffJobs != 1 {
+		t.Fatalf("DispatchBackoffJobs = %d, want 1", snap.DispatchBackoffJobs)
+	}
+	if !snap.Quiet() {
+		t.Fatalf("Quiet() = false, want true: the only queued job cannot be attempted, so it is not work in flight (%+v)", snap)
+	}
+
+	// Advance the run's most recent real attempt far enough into the past
+	// that its backoff window has elapsed.
+	if _, err := database.Exec(`UPDATE lifecycle_events SET occurred_at = ? WHERE job_id = ? AND detail = ? AND occurred_at = ?`,
+		lastAttempt.Add(-2*ops.DispatchBackoffCap).Unix(), jobID,
+		"artifact needs staging failed: R2-pull inventory hosts do not yet stage producer-job --needs artifacts",
+		lastAttempt.Unix(),
+	); err != nil {
+		t.Fatalf("advance last attempt into the past: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE lifecycle_events SET occurred_at = ? WHERE job_id = ? AND occurred_at = ?`,
+		runStart.Add(-2*ops.DispatchBackoffCap).Unix(), jobID, runStart.Unix(),
+	); err != nil {
+		t.Fatalf("advance run start into the past: %v", err)
+	}
+
+	elapsed, err := ReadWakeSnapshot(database)
+	if err != nil {
+		t.Fatalf("ReadWakeSnapshot (elapsed): %v", err)
+	}
+	if elapsed.DispatchBackoffJobs != 0 {
+		t.Fatalf("DispatchBackoffJobs = %d, want 0 (window elapsed)", elapsed.DispatchBackoffJobs)
+	}
+	if elapsed.Quiet() {
+		t.Fatal("Quiet() = true, want false: an attemptable queued job is work in flight")
 	}
 }
 

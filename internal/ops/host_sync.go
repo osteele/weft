@@ -975,11 +975,23 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 	var failures []string
 	recordFailure := func(jobID int64, stage string, err error) {
 		failures = append(failures, fmt.Sprintf("job %s %s: %v", ids.FormatJobID(jobID), stage, err))
-		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+		// Unlike recordDeferred (and every other InsertLifecycleEventDedup
+		// call site here), this is an unconditional insert: the dispatch
+		// backoff gate above anchors its schedule on the most recent
+		// EventQueueDispatchFailed row (db.LatestDispatchAttemptRun's
+		// OccurredAt). A dedup window on this event would let real attempts
+		// happen without ever refreshing that anchor, so an already-elapsed
+		// eligibility window would keep re-firing every pass instead of only
+		// once per backoff period — the bug this gate exists to fix,
+		// reimplemented via a stale "last attempt" timestamp. Once backoff
+		// is active, attempts are already >=1 minute apart, so removing the
+		// dedup here does not reopen the log-volume problem it existed to
+		// solve; it only affects the brief pre-backoff window (age < 5m).
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 			EventKind: db.EventQueueDispatchFailed,
 			JobID:     jobID,
 			Detail:    truncateDispatchDetail(stage + ": " + err.Error()),
-		}, dispatchEventDedupeWindow)
+		})
 	}
 
 	// Stage rental-produced --needs artifacts for every queued job on this host
@@ -995,6 +1007,34 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		}
 		seenStage[job.ID] = true
 		allQueued = append(allQueued, job)
+	}
+
+	// Gate dispatch on a per-job backoff before doing any real work for a
+	// job whose remote dispatch keeps failing identically: attempting a
+	// stuck job every pass (once per daemon tick) is the bug this backoff
+	// exists to fix. A deferral is not a failure — it must not go through
+	// recordFailure, or it would compound the very run it is backing off
+	// from.
+	now := time.Now()
+	backingOff := make(map[int64]bool)
+	for _, job := range allQueued {
+		if job == nil {
+			continue
+		}
+		remaining, inBackoff := dispatchBackoffRemaining(database, job, now)
+		if !inBackoff {
+			continue
+		}
+		backingOff[job.ID] = true
+		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+			EventKind: db.EventQueueDispatchDeferred,
+			JobID:     job.ID,
+			Detail:    truncateDispatchDetail(fmt.Sprintf("dispatch backoff: retrying in %s", remaining.Round(time.Second))),
+		}, dispatchEventDedupeWindow)
+	}
+	if len(backingOff) > 0 {
+		allQueued = excludeJobsByID(allQueued, backingOff)
+		jobs = excludeJobsByID(jobs, backingOff)
 	}
 	stageFailures := make(map[int64]error)
 	if !hostUsesR2Queue(host) {
@@ -1469,6 +1509,23 @@ func truncateDispatchDetail(s string) string {
 		s = s[:i]
 	}
 	return util.Truncate(strings.TrimSpace(s), 240)
+}
+
+// excludeJobsByID returns jobs with any job whose ID is in exclude removed,
+// preserving order. Used to drop dispatch-backoff-deferred jobs from the
+// lists ensureQueuedJobsOnRemote otherwise attempts unconditionally.
+func excludeJobsByID(jobs []*db.Job, exclude map[int64]bool) []*db.Job {
+	if len(exclude) == 0 {
+		return jobs
+	}
+	kept := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && exclude[job.ID] {
+			continue
+		}
+		kept = append(kept, job)
+	}
+	return kept
 }
 
 // shortSHA returns the first 8 hex characters of a SHA, or the full string if

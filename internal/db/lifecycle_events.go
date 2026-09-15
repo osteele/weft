@@ -436,6 +436,160 @@ func CountJobDispatchFailuresMatching(database *sql.DB, jobID int64, detailPrefi
 	return n, nil
 }
 
+// DispatchRun describes the current run of consecutive dispatch events
+// sharing an identical detail for a job, since the most recent
+// EventQueueDispatchOK (or floor, whichever is later). Shared by
+// internal/explain (diagnose surface) and internal/ops (dispatch backoff
+// gate) so this query lives in exactly one place.
+type DispatchRun struct {
+	Kind            string
+	Detail          string
+	OccurredAt      time.Time // most recent event in the run (attempt clock)
+	FirstOccurredAt time.Time // oldest event in the run (run start)
+	RetryCount      int
+}
+
+// LatestDispatchDisplayRun returns the run used to explain a queued job's
+// current dispatch blocker to a human (weft job diagnose / TUI). It treats
+// EventQueueDispatchFailed and EventQueueDispatchDeferred as block events: a
+// fresher event of either kind with a different detail masks an older one,
+// so a transient "host unreachable" deferral supersedes a stale hard
+// failure once dispatch has moved past it.
+func LatestDispatchDisplayRun(database *sql.DB, jobID int64, floor int64, now time.Time) (DispatchRun, bool) {
+	return latestDispatchRun(database, jobID, floor, now, EventQueueDispatchFailed, EventQueueDispatchDeferred)
+}
+
+// LatestDispatchAttemptRun returns the run of consecutive real dispatch
+// attempts (EventQueueDispatchFailed only) for a job, ignoring
+// EventQueueDispatchDeferred. Used by the dispatch backoff gate.
+//
+// This must not include EventQueueDispatchDeferred: the gate itself emits a
+// deferred event on every pass it skips, carrying a detail ("N remaining")
+// that changes each time. If that event were a block candidate here, it
+// would become the freshest row on the very next read and mask the real
+// failure detail with a one-off, single-occurrence run — collapsing
+// FirstOccurredAt back to "just now" on every check and never letting the
+// backoff escalate. Restricting to Failed+OK keeps this run anchored to
+// real attempts regardless of how the gate's own bookkeeping is recorded.
+func LatestDispatchAttemptRun(database *sql.DB, jobID int64, floor int64, now time.Time) (DispatchRun, bool) {
+	return latestDispatchRun(database, jobID, floor, now, EventQueueDispatchFailed)
+}
+
+// latestDispatchRun computes the run described by DispatchRun. blockKinds
+// are the non-OK event kinds considered part of a run; EventQueueDispatchOK
+// is always included as the terminator. A run is identified by (job_id,
+// detail): a changed detail (or an event kind outside blockKinds) starts a
+// new run and closes the old one; EventQueueDispatchOK ends it; floor
+// bounds it from below.
+func latestDispatchRun(database *sql.DB, jobID int64, floor int64, now time.Time, blockKinds ...string) (DispatchRun, bool) {
+	kinds := make([]string, 0, len(blockKinds)+1)
+	kinds = append(kinds, EventQueueDispatchOK)
+	kinds = append(kinds, blockKinds...)
+	placeholders := make([]string, len(kinds))
+	args := make([]any, 0, len(kinds)+2)
+	args = append(args, jobID)
+	for i, k := range kinds {
+		placeholders[i] = "?"
+		args = append(args, k)
+	}
+	// The floor bounds the run to this queueing of the job. Applying it in SQL
+	// rather than only in the scan loop lets idx_le_job_kind_occurred restrict
+	// what is examined, not just what is returned: this query moved from the
+	// on-demand diagnose path into one that runs per queued job per wake
+	// snapshot, where scanning a job's whole dispatch history is the kind of
+	// per-pass cost the backoff exists to remove.
+	floorClause := ""
+	if floor > 0 {
+		floorClause = "\n\t\t  AND occurred_at >= ?"
+		args = append(args, floor)
+	}
+	rows, err := database.Query(fmt.Sprintf(`SELECT occurred_at, event_kind, COALESCE(detail, '')
+		FROM lifecycle_events
+		WHERE job_id = ?
+		  AND event_kind IN (%s)%s
+		ORDER BY occurred_at DESC, id DESC`, strings.Join(placeholders, ", "), floorClause),
+		args...)
+	if err != nil {
+		return DispatchRun{}, false
+	}
+	defer rows.Close()
+
+	var run DispatchRun
+	closed := false
+	var latestOK int64
+	for rows.Next() {
+		var occurredAt int64
+		var kind string
+		var detail string
+		if err := rows.Scan(&occurredAt, &kind, &detail); err != nil {
+			continue
+		}
+		if floor > 0 && occurredAt < floor {
+			continue
+		}
+		if kind == EventQueueDispatchOK {
+			if latestOK == 0 || occurredAt > latestOK {
+				latestOK = occurredAt
+			}
+			if run.Detail != "" {
+				closed = true
+			}
+			continue
+		}
+		if closed {
+			continue
+		}
+		detail = strings.TrimSpace(detail)
+		if detail == "" {
+			continue
+		}
+		if latestOK > 0 && latestOK >= occurredAt && !dispatchFailurePersistsAfterOK(detail) {
+			continue
+		}
+		if run.Detail == "" {
+			run = DispatchRun{
+				Kind:            kind,
+				Detail:          detail,
+				OccurredAt:      time.Unix(occurredAt, 0),
+				FirstOccurredAt: time.Unix(occurredAt, 0),
+				RetryCount:      1,
+			}
+			continue
+		}
+		if detail == run.Detail {
+			run.FirstOccurredAt = time.Unix(occurredAt, 0)
+			run.RetryCount++
+		} else {
+			closed = true
+		}
+	}
+	if run.Detail == "" {
+		return DispatchRun{}, false
+	}
+	return run, true
+}
+
+func dispatchFailurePersistsAfterOK(detail string) bool {
+	return strings.TrimSpace(detail) == FailureReasonR2IsolatedSourceFetchFailed
+}
+
+// DispatchRunFloor returns the lower time bound (unix seconds) for a job's
+// dispatch run: QueuedAt when set, else CreatedAt. QueuedAt moves forward on
+// every fresh attempt — verified in createAttemptTx (internal/db/attempts.go),
+// which stamps queued_at = now() unconditionally on insert, including for
+// the attempt a `weft retry` / requeue creates — so this floor naturally
+// resets a stale run without a second reset mechanism.
+func DispatchRunFloor(job *Job) int64 {
+	if job == nil {
+		return 0
+	}
+	floor := job.QueuedAt
+	if floor <= 0 {
+		floor = job.CreatedAt
+	}
+	return floor
+}
+
 // LatestJobDispatchFailureDetail returns the detail string of the most recent
 // EventQueueDispatchFailed event for a job whose detail starts with
 // detailPrefix. Returns "" with nil error when no matching event exists.

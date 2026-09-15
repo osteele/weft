@@ -3851,6 +3851,73 @@ rule AutoPilotDispatchPolicy {
         -- unreachable host is unknown state, not idle state.
 }
 
+-- An unrecognized blocker keeps its timer: TypedBlockerRecheckCadence's
+-- fallback is one-sided because failure to classify is never evidence that no
+-- timer is needed. That protects a transient blocker from being stranded, and
+-- it leaves the cost of an unclassified condition unbounded — a blocker that
+-- cannot clear is retried at the market cadence for as long as it stands. The
+-- timer is the safety property. The cadence is not, and decays instead.
+--
+-- A run is the consecutive dispatch failures carrying one unchanged detail
+-- since the job's last successful dispatch, floored at its queue time. A
+-- changed detail, a success, or a requeue starts a new run.
+
+rule UnchangedBlockerDispatchDecay {
+    when: DispatchAttemptConsidered(job, run)
+
+    let age = RunAge(run)
+
+    -- A flap recovers at full speed. Only a blocker that has stood unchanged
+    -- long enough to be something other than a flap pays a delay.
+    if age < DispatchDecayGrace:
+        ensures: DispatchDelay(job, run) = 0
+
+    if age >= DispatchDecayGrace:
+        ensures: DispatchDelay(job, run) >= DispatchDecayFloor
+        ensures: DispatchDelay(job, run) <= DispatchDecayCap
+
+    -- The cap is the backstop: the backstop is already the interval at which
+    -- the system promises to take a fresh look, and a job deferred past it
+    -- would be waiting on a promise nothing makes.
+    ensures: DispatchDecayCap <= AutopilotQuietBackstop
+
+    -- Independent pollers on a fixed backoff retry in lockstep and re-create
+    -- the condition they waited out. The jitter is derived from the job rather
+    -- than sampled, because a delay resampled each pass makes one job's
+    -- eligibility flap inside its own window.
+    ensures: Deterministic(DispatchDelay(job, run))
+
+    -- A deferred attempt is not a failed one, and is not part of the run it
+    -- defers. Reading the gate's own bookkeeping event back as the freshest
+    -- row would reset the run's start to now on every check and flatten the
+    -- decay to nothing.
+    ensures: DeferredDispatchEvent(job) = queue_dispatch_deferred
+
+    -- A job that cannot be attempted is not work in flight. Counting it as
+    -- such holds the daemon at its short sync cadence — a full R2 and SSH
+    -- pre-pass sync every 30 to 90 seconds — for as long as the job is stuck.
+    ensures: QuietIgnoresBackedOffJobs()
+
+    -- legacy annotation: @guidance
+        -- Gate and schedule: internal/ops/dispatch_backoff.go —
+        -- dispatchBackoffRemaining, dispatchBackoffDelay, DispatchBackoffCap,
+        -- CountQueuedDispatchBackoff. Run query: internal/db/lifecycle_events.go
+        -- — LatestDispatchAttemptRun (failures and successes only, for the
+        -- gate) beside LatestDispatchDisplayRun (which also reads deferrals,
+        -- for the diagnose surface), sharing latestDispatchRun; DispatchRunFloor.
+        -- Liveness: internal/orchestration/dispatch.go —
+        -- WakeSnapshot.DispatchBackoffJobs and Quiet.
+        --
+        -- The run is derived from lifecycle events rather than stored, which
+        -- makes the event stream load-bearing twice over. The dispatch-failure
+        -- event must be written once per attempt: a dedupe window wider than
+        -- the decay floor makes the stream undercount attempts, so the anchor
+        -- never advances and every pass re-attempts. And the query must stay
+        -- indexed (idx_le_job_kind_occurred): it runs once per queued job per
+        -- wake-snapshot read, so an unindexed scan of every job's dispatch
+        -- history reintroduces the per-pass cost this rule removes.
+}
+
 rule ExistingInstanceCPUFloor {
     when: ReuseExistingInstance(job, instance)
        or QueueRebalanceTarget(job, instance)

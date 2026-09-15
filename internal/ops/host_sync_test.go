@@ -872,6 +872,212 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnArtifactStagingFailure(t *testing.T)
 	}
 }
 
+// TestEnsureQueuedJobsOnRemote_DefersWhenInDispatchBackoff seeds a job whose
+// dispatch-failure run has already aged past the backoff threshold, with its
+// most recent real attempt only seconds ago (so it is not yet eligible
+// again), and verifies the pass skips it: no SSH append, no new
+// EventQueueDispatchFailed row, and a EventQueueDispatchDeferred row instead
+// (a deferral is not a failure — recording it as one would compound the run
+// it exists to back off from).
+func TestEnsureQueuedJobsOnRemote_DefersWhenInDispatchBackoff(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "test-host", "/tmp", "echo hello", "backed-off job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"asset:missing-asset"}); err != nil {
+		t.Fatalf("set needs: %v", err)
+	}
+
+	now := time.Now()
+	runStart := now.Add(-6 * time.Minute)
+	lastAttempt := now.Add(-5 * time.Second)
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, runStart.Unix(), jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+	for _, at := range []time.Time{runStart, lastAttempt} {
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			OccurredAt: at.Unix(),
+			EventKind:  db.EventQueueDispatchFailed,
+			JobID:      jobID,
+			Detail:     "artifact needs staging failed: R2-pull inventory hosts do not yet stage producer-job --needs artifacts",
+		}); err != nil {
+			t.Fatalf("seed failure at %v: %v", at, err)
+		}
+	}
+
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		t.Fatal("source sync should not run for a job deferred by dispatch backoff")
+		return nil
+	}))
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		switch {
+		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+			return "__WEFT_NO_STATE_FILE__\n", "", 0
+		case strings.Contains(command, `"op":"add"`):
+			t.Errorf("unexpected append for a job in dispatch backoff: %s", command)
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+
+	before, err := db.LatestLifecycleEventID(database)
+	if err != nil {
+		t.Fatalf("LatestLifecycleEventID: %v", err)
+	}
+
+	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
+	if err != nil {
+		t.Fatalf("ensureQueuedJobsOnRemote: %v, want nil (a deferral is not a failure)", err)
+	}
+	if ensured != 0 {
+		t.Fatalf("ensured = %d, want 0", ensured)
+	}
+
+	events, err := db.ListLifecycleEventsAfterID(database, before, 10)
+	if err != nil {
+		t.Fatalf("ListLifecycleEventsAfterID: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("new events = %d, want exactly 1 (the deferral)", len(events))
+	}
+	if events[0].EventKind != db.EventQueueDispatchDeferred {
+		t.Fatalf("EventKind = %q, want %q", events[0].EventKind, db.EventQueueDispatchDeferred)
+	}
+	if !strings.Contains(events[0].Detail, "dispatch backoff") {
+		t.Fatalf("Detail = %q, want it to name the backoff", events[0].Detail)
+	}
+}
+
+// TestEnsureQueuedJobsOnRemote_RepeatedFailuresBackOffAtIncreasingIntervals
+// is the regression test for the wj8147 bug: a job whose dispatch attempt
+// fails with a byte-identical error on every pass must not be re-attempted
+// on every pass forever. It exercises three phases against the same
+// artifact-staging failure ensureQueuedJobsOnRemote hit in production:
+//
+//  1. Below the backoff age threshold, every pass is a real attempt and
+//     produces its own EventQueueDispatchFailed row — proving the dispatch-
+//     failure dedupe trap (Change/host_sync.go recordFailure) no longer
+//     collapses the event stream into ~1 row per 5 minutes.
+//  2. Once the run's age crosses the threshold, the very next pass is
+//     deferred rather than re-attempted, even though it is still "the next
+//     pass" — this is the bug fix: dispatch stops trying every pass.
+//  3. Once backoff's own delay elapses, dispatch resumes — the deferral is
+//     temporary, not a permanent give-up.
+func TestEnsureQueuedJobsOnRemote_RepeatedFailuresBackOffAtIncreasingIntervals(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "test-host", "/tmp", "echo hello", "wj8147-like job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"asset:missing-asset"}); err != nil {
+		t.Fatalf("set needs: %v", err)
+	}
+	// db.DispatchRunFloor falls back to CreatedAt when QueuedAt is unset;
+	// backdate it so phase 2's backdated failure event isn't excluded by
+	// the run query's floor filter.
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`,
+		time.Now().Add(-time.Hour).Unix(), jobID); err != nil {
+		t.Fatalf("backdate queued_at: %v", err)
+	}
+
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		t.Fatal("source sync should not run when artifact staging fails first")
+		return nil
+	}))
+	appendCount := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		switch {
+		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+			return "__WEFT_NO_STATE_FILE__\n", "", 0
+		case strings.Contains(command, `"op":"add"`):
+			appendCount++
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+
+	failedCount := func() int {
+		t.Helper()
+		var n int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM lifecycle_events WHERE job_id = ? AND event_kind = ?`,
+			jobID, db.EventQueueDispatchFailed).Scan(&n); err != nil {
+			t.Fatalf("count failed events: %v", err)
+		}
+		return n
+	}
+	deferredCount := func() int {
+		t.Helper()
+		var n int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM lifecycle_events WHERE job_id = ? AND event_kind = ?`,
+			jobID, db.EventQueueDispatchDeferred).Scan(&n); err != nil {
+			t.Fatalf("count deferred events: %v", err)
+		}
+		return n
+	}
+
+	// Phase 1: age well under the 5-minute threshold. Three passes in a
+	// row, each a real attempt.
+	for i := 1; i <= 3; i++ {
+		if _, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default()); err == nil {
+			t.Fatalf("pass %d: expected the artifact staging failure to surface", i)
+		}
+		if got := failedCount(); got != i {
+			t.Fatalf("pass %d: failed events = %d, want %d (dedupe must not collapse consecutive identical failures)", i, got, i)
+		}
+	}
+	if appendCount != 0 {
+		t.Fatalf("appendCount = %d, want 0 (staging never succeeded)", appendCount)
+	}
+
+	// Phase 2: age the run's earliest recorded failure past the 5-minute
+	// threshold, leaving the run's most recent event (from phase 1) as-is —
+	// i.e. simulate that real time has passed since the last pass. The next
+	// pass must defer rather than attempt again.
+	if _, err := database.Exec(`
+		UPDATE lifecycle_events
+		   SET occurred_at = ?
+		 WHERE job_id = ? AND event_kind = ?
+		   AND id = (SELECT MIN(id) FROM lifecycle_events WHERE job_id = ? AND event_kind = ?)`,
+		time.Now().Add(-6*time.Minute).Unix(), jobID, db.EventQueueDispatchFailed, jobID, db.EventQueueDispatchFailed,
+	); err != nil {
+		t.Fatalf("backdate run start: %v", err)
+	}
+
+	if _, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default()); err != nil {
+		t.Fatalf("pass 4 (should defer): %v, want nil (a deferral is not a failure)", err)
+	}
+	if got := failedCount(); got != 3 {
+		t.Fatalf("failed events after pass 4 = %d, want still 3 (deferred, not attempted)", got)
+	}
+	if got := deferredCount(); got != 1 {
+		t.Fatalf("deferred events after pass 4 = %d, want 1", got)
+	}
+
+	// Phase 3: advance time past the backoff delay (bounded by the cap) with
+	// no further attempts recorded — exactly what phase 2's deferral
+	// guarantees. Dispatch must resume.
+	if _, err := database.Exec(`
+		UPDATE lifecycle_events
+		   SET occurred_at = occurred_at - ?
+		 WHERE job_id = ?`,
+		int64((2 * DispatchBackoffCap).Seconds()), jobID,
+	); err != nil {
+		t.Fatalf("advance clock past backoff: %v", err)
+	}
+
+	if _, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default()); err == nil {
+		t.Fatal("pass 5 (backoff elapsed): expected the artifact staging failure to surface again")
+	}
+	if got := failedCount(); got != 4 {
+		t.Fatalf("failed events after pass 5 = %d, want 4 (dispatch resumed)", got)
+	}
+}
+
 func TestEnsureQueuedJobsOnRemote_SourceSyncFailureSkipsSameDirJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 	workingDir := t.TempDir()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 )
 
 // Autopilot dispatch policy, shared by every runner (headless `weft autopilot
@@ -163,6 +164,19 @@ type WakeSnapshot struct {
 	// ActiveJobs are queued or running jobs. A job finishing frees on-prem
 	// and rental capacity that a blocked job may be waiting for.
 	ActiveJobs int
+	// DispatchBackoffJobs is the subset of ActiveJobs that are queued
+	// inventory-host jobs currently inside a dispatch backoff window (see
+	// ops.CountQueuedDispatchBackoff): dispatch has given up on them for now,
+	// so no pass can make progress on them regardless of cadence. Quiet()
+	// excludes them from "work in flight" for that reason. The count still
+	// changes across passes as jobs enter and leave backoff, and both
+	// transitions are worth a wake — entering backoff is new information
+	// (dispatch stopped trying), and leaving it makes the job attemptable
+	// again — so this field participates in ordinary snapshot-equality wake
+	// detection like every other field here. It cannot change on every read
+	// with no underlying event: the backoff window's jitter is deterministic
+	// per job ID, not recomputed per pass.
+	DispatchBackoffJobs int
 	// LiveLaunches are instances in a non-terminal state.
 	LiveLaunches int
 	// OpenPlacementIntents and OpenMoveIntents mark jobs another path owns;
@@ -206,6 +220,11 @@ func ReadWakeSnapshot(database *sql.DB) (WakeSnapshot, error) {
 	).Scan(&snap.ActiveJobs); err != nil {
 		return snap, err
 	}
+	backoff, err := ops.CountQueuedDispatchBackoff(database, time.Now())
+	if err != nil {
+		return snap, err
+	}
+	snap.DispatchBackoffJobs = backoff
 	if err := database.QueryRow(`
 		SELECT COUNT(*)
 		  FROM launches
@@ -233,7 +252,7 @@ func ReadWakeSnapshot(database *sql.DB) (WakeSnapshot, error) {
 // with live instances or queued jobs.
 func (s WakeSnapshot) Quiet() bool {
 	return s.UnplacedJobs == 0 &&
-		s.ActiveJobs == 0 &&
+		s.ActiveJobs-s.DispatchBackoffJobs == 0 &&
 		s.LiveLaunches == 0 &&
 		s.OpenPlacementIntents == 0 &&
 		s.OpenMoveIntents == 0

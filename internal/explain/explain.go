@@ -38,13 +38,7 @@ type Explanation struct {
 	AutoReplanAllowed bool
 }
 
-type DispatchBlock struct {
-	Kind            string
-	Detail          string
-	OccurredAt      time.Time
-	FirstOccurredAt time.Time
-	RetryCount      int
-}
+type DispatchBlock = db.DispatchRun
 
 func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 	if now.IsZero() {
@@ -348,82 +342,8 @@ func LatestInventoryDispatchBlock(database *sql.DB, job *db.Job, now time.Time) 
 	if database == nil || job == nil || !job.HasInventoryHost() || job.EffectiveStatus() != db.StatusQueued {
 		return DispatchBlock{}, false
 	}
-	floor := job.QueuedAt
-	if floor <= 0 {
-		floor = job.CreatedAt
-	}
-	return latestDispatchBlock(database, job.ID, floor, now)
-}
-
-func latestDispatchBlock(database *sql.DB, jobID int64, floor int64, now time.Time) (DispatchBlock, bool) {
-	rows, err := database.Query(`SELECT occurred_at, event_kind, COALESCE(detail, '')
-		FROM lifecycle_events
-		WHERE job_id = ?
-		  AND event_kind IN (?, ?, ?)
-		ORDER BY occurred_at DESC, id DESC`,
-		jobID, db.EventQueueDispatchFailed, db.EventQueueDispatchOK, db.EventQueueDispatchDeferred)
-	if err != nil {
-		return DispatchBlock{}, false
-	}
-	defer rows.Close()
-
-	var block DispatchBlock
-	closed := false
-	var latestOK int64
-	for rows.Next() {
-		var occurredAt int64
-		var kind string
-		var detail string
-		if err := rows.Scan(&occurredAt, &kind, &detail); err != nil {
-			continue
-		}
-		if floor > 0 && occurredAt < floor {
-			continue
-		}
-		if kind == db.EventQueueDispatchOK {
-			if latestOK == 0 || occurredAt > latestOK {
-				latestOK = occurredAt
-			}
-			if block.Detail != "" {
-				closed = true
-			}
-			continue
-		}
-		if closed {
-			continue
-		}
-		detail = strings.TrimSpace(detail)
-		if detail == "" {
-			continue
-		}
-		if latestOK > 0 && latestOK >= occurredAt && !dispatchFailurePersistsAfterOK(detail) {
-			continue
-		}
-		if block.Detail == "" {
-			block = DispatchBlock{
-				Kind:            kind,
-				Detail:          detail,
-				OccurredAt:      time.Unix(occurredAt, 0),
-				FirstOccurredAt: time.Unix(occurredAt, 0),
-				RetryCount:      1,
-			}
-			continue
-		}
-		if detail == block.Detail {
-			block.FirstOccurredAt = time.Unix(occurredAt, 0)
-			block.RetryCount++
-		} else {
-			closed = true
-		}
-	}
-	if block.Detail == "" {
-		return DispatchBlock{}, false
-	}
-	return block, true
-}
-
-func dispatchFailurePersistsAfterOK(detail string) bool {
-	return strings.TrimSpace(detail) == db.FailureReasonR2IsolatedSourceFetchFailed
+	floor := db.DispatchRunFloor(job)
+	return db.LatestDispatchDisplayRun(database, job.ID, floor, now)
 }
 
 func SummaryLine(x Explanation) string {

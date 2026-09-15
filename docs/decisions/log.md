@@ -52,3 +52,13 @@ achieve Q, accepting D.*
   timezone, and neglected local time as the CLI default, to make times
   comparable across machines, accepting different default clock displays
   between the CLI and the local-time TUI.
+
+- **2026-09-15** — In the context of the autopilot's blocker-recheck policy,
+  facing an unrecognized dispatch blocker that the deliberately one-sided
+  string fallback maps to the hottest cadence, we decided to let an unchanged
+  blocker's retry interval decay with the age of its failure run and to stop
+  counting undispatchable jobs as work in flight, and neglected typing this
+  blocker as `precondition` so it would map to `recheck_none`, to bound the
+  cost of every condition nobody has classified rather than one condition at a
+  time, accepting up to ten minutes' added latency when a blocker does clear on
+  its own.
