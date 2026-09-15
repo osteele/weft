@@ -1,8 +1,10 @@
 package db
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,6 +107,33 @@ func TestOpenForReading_RefusesStaleSchema(t *testing.T) {
 	var e *ErrSchemaMismatch
 	if !errors.As(err, &e) {
 		t.Fatalf("expected ErrSchemaMismatch from OpenForReading, got %T: %v", err, err)
+	}
+}
+
+func TestOpenReadOnlyForReadingRefusesPendingMigrationWithoutMutating(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	seedPendingMigrationTestDBFile(t, dbFile)
+	before, err := os.ReadFile(dbFile)
+	if err != nil {
+		t.Fatalf("read database before open: %v", err)
+	}
+	cleanup := SetDBPath(dbFile)
+	defer cleanup()
+
+	database, err := OpenReadOnlyForReading()
+	if database != nil {
+		database.Close()
+	}
+	var mismatch *ErrSchemaMismatch
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("OpenReadOnlyForReading() error = %T: %v, want ErrSchemaMismatch", err, err)
+	}
+	after, err := os.ReadFile(dbFile)
+	if err != nil {
+		t.Fatalf("read database after open: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("read-only schema validation modified the database")
 	}
 }
 

@@ -17,6 +17,11 @@ func (m Model) handleJobsRefreshed(msg jobsRefreshedMsg) (Model, tea.Cmd) {
 	if msg.err != nil {
 		return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
 	}
+	jobs, err := FilterJobsByScope(m.database, msg.jobs, m.jobScope)
+	if err != nil {
+		return m, m.setFlash(fmt.Sprintf("Error applying job scope: %v", err), true)
+	}
+	msg.jobs = jobs
 	m.allJobs = msg.jobs
 	queueblock.Apply(m.allJobs, queueblock.FromHosts(m.hosts))
 	if msg.jobDependencies != nil {

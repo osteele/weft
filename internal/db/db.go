@@ -1092,6 +1092,21 @@ func OpenForReading() (*sql.DB, error) {
 	return database, nil
 }
 
+// OpenReadOnlyForReading opens the database without permitting migrations,
+// startup repairs, or other writes, then verifies that its schema is compatible
+// with this binary.
+func OpenReadOnlyForReading() (*sql.DB, error) {
+	database, err := OpenReadOnly()
+	if err != nil {
+		return nil, err
+	}
+	if verifyErr := verifySchemaVersion(database); verifyErr != nil {
+		database.Close()
+		return nil, verifyErr
+	}
+	return database, nil
+}
+
 // OpenReadOnly opens the database in read-only mode without running schema
 // migrations. Use this as a fallback when Open() fails with SQLITE_BUSY or
 // SQLITE_READONLY, so read-only commands can still display data.
@@ -1099,7 +1114,7 @@ func OpenReadOnly() (*sql.DB, error) {
 	if err := localLedgerRefusedError("job"); err != nil {
 		return nil, err
 	}
-	connStr := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&mode=ro", dbPath)
+	connStr := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&mode=ro", dbPath)
 	database, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open database read-only: %w", err)
@@ -4260,6 +4275,38 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 // ListJobs returns jobs matching the given filters
 func ListJobs(db *sql.DB, status, host string, limit int, tags []string, processedFilter string) ([]*Job, error) {
 	return ListJobsWithMaxAge(db, status, host, limit, 0, tags, processedFilter)
+}
+
+// ListJobsByAttribution returns jobs whose stored submission session and
+// canonical project root exactly match, applying the result limit only after
+// both attribution predicates.
+func ListJobsByAttribution(db *sql.DB, submitterSession, projectRoot string, limit int) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s
+		FROM job_status
+		JOIN jobs AS attributed_jobs ON attributed_jobs.id = job_status.id
+		WHERE job_status.tombstoned = 0
+		  AND attributed_jobs.submitter_session = ?
+		  AND attributed_jobs.submitter_session IS NOT NULL
+		  AND attributed_jobs.submitter_session != ''
+		  AND attributed_jobs.project_root = ?
+		ORDER BY CASE WHEN job_status.status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END,
+		         job_status.id DESC`, qualifiedJobSelectColumns("job_status"))
+	args := []interface{}{submitterSession, projectRoot}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	jobs, err := queryJobs(db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if err := PopulateSubmitterSessions(db, jobs); err != nil {
+		return nil, err
+	}
+	if err := PopulateProjectRoots(db, jobs); err != nil {
+		return nil, err
+	}
+	return jobs, nil
 }
 
 // ListJobsByStatuses returns jobs matching any provided status and optional host/project filters.

@@ -19,16 +19,29 @@ type InitialSnapshot struct {
 // LoadInitialSnapshot returns the best-effort startup snapshot using only
 // local database and cached host information.
 func LoadInitialSnapshot(database *sql.DB, hostCacheDuration time.Duration) InitialSnapshot {
+	snapshot, _ := loadInitialSnapshot(database, hostCacheDuration, nil)
+	return snapshot
+}
+
+// LoadInitialSnapshotForScope returns a startup snapshot whose job query
+// applies exact stored attribution before its result limit.
+func LoadInitialSnapshotForScope(database *sql.DB, hostCacheDuration time.Duration, scope *JobScope) (InitialSnapshot, error) {
+	return loadInitialSnapshot(database, hostCacheDuration, scope)
+}
+
+func loadInitialSnapshot(database *sql.DB, hostCacheDuration time.Duration, scope *JobScope) (InitialSnapshot, error) {
 	snapshot := InitialSnapshot{
 		JobDependencies: make(map[int64]string),
 		HostSyncTimes:   make(map[string]time.Time),
 	}
 
-	jobs, err := db.ListJobs(database, "", "", 1000, nil, "")
+	jobs, err := listJobsForScope(database, scope, 1000)
+	if err != nil && scope != nil {
+		return snapshot, err
+	}
 	if err == nil {
 		snapshot.Jobs = jobs
 	}
-
 	deps, err := db.GetJobDependencyInfo(database)
 	if err == nil {
 		snapshot.JobDependencies = deps
@@ -41,7 +54,7 @@ func LoadInitialSnapshot(database *sql.DB, hostCacheDuration time.Duration) Init
 
 	hostNames, err := db.ListHostsForTUI(database)
 	if err != nil {
-		return snapshot
+		return snapshot, nil
 	}
 
 	cachedHosts, err := db.LoadAllCachedHosts(database)
@@ -77,5 +90,5 @@ func LoadInitialSnapshot(database *sql.DB, hostCacheDuration time.Duration) Init
 	}
 	snapshot.Hosts = hosts
 
-	return snapshot
+	return snapshot, nil
 }

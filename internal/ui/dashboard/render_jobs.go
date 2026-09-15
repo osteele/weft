@@ -64,21 +64,25 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"l", "Toggle logs view"},
 			{"f", "Cycle job filters"},
 			{"H", "Cycle host filter"},
-			{"r", "Refresh job statuses"},
-			{"n", "New job"},
-			{"e", "Edit queued/draft job"},
-			{"R", "Restart job"},
-			{"E", "Edit & restart job"},
-			{"k", "Kill/cancel job"},
-			{"p", "Pause running job"},
-			{"d", "Toggle draft/queue status"},
-			{"g", "Start queued/draft job now or resume paused"},
-			{"c", "Rental GPU options (queued jobs)"},
-			{"G", "Generate AI description"},
-			{"x", "Remove job from list"},
-			{"P", "Prune completed/dead jobs"},
-			{"Esc", "Clear selection/messages"},
+			{"r", "Refresh local job state"},
 		}
+		if !m.readOnly {
+			shortcuts = append(shortcuts,
+				struct{ key, desc string }{"n", "New job"},
+				struct{ key, desc string }{"e", "Edit queued/draft job"},
+				struct{ key, desc string }{"R", "Restart job"},
+				struct{ key, desc string }{"E", "Edit & restart job"},
+				struct{ key, desc string }{"k", "Kill/cancel job"},
+				struct{ key, desc string }{"p", "Pause running job"},
+				struct{ key, desc string }{"d", "Toggle draft/queue status"},
+				struct{ key, desc string }{"g", "Start queued/draft job now or resume paused"},
+				struct{ key, desc string }{"c", "Rental GPU options (queued jobs)"},
+				struct{ key, desc string }{"G", "Generate AI description"},
+				struct{ key, desc string }{"x", "Remove job from list"},
+				struct{ key, desc string }{"P", "Prune completed/dead jobs"},
+			)
+		}
+		shortcuts = append(shortcuts, struct{ key, desc string }{"Esc", "Clear selection/messages"})
 		for _, s := range shortcuts {
 			b.WriteString(keyStyle.Render(s.key))
 			b.WriteString(descStyle.Render(s.desc))
@@ -90,8 +94,12 @@ func (m Model) renderHelpOverlay(background string) string {
 		shortcuts := []struct{ key, desc string }{
 			{"↑/↓", "Navigate host list"},
 			{"←/→", "Switch to jobs view"},
-			{"d", "Toggle AI summaries"},
-			{"x", "Delete host"},
+		}
+		if !m.readOnly {
+			shortcuts = append(shortcuts,
+				struct{ key, desc string }{"d", "Toggle AI summaries"},
+				struct{ key, desc string }{"x", "Delete host"},
+			)
 		}
 		for _, s := range shortcuts {
 			b.WriteString(keyStyle.Render(s.key))
@@ -1350,8 +1358,14 @@ func (m Model) renderSystemSummaryLines(width int) string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort r:refresh n:new e:edit R:restart k:kill d:draft c:rental P:prune")
+	helpText := "?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort r:refresh"
 	daemon := renderDashboardDaemonStatus()
+	if m.readOnly {
+		daemon = helpStyle.Render("READ ONLY · SESSION SCOPED")
+	} else {
+		helpText += " n:new e:edit R:restart k:kill d:draft c:rental P:prune"
+	}
+	help := helpStyle.Render(helpText)
 
 	// Right-align the help text
 	gap := m.width - lipgloss.Width(help) - lipgloss.Width(daemon) - 2

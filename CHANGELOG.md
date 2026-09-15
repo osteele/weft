@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refusal codes and UTF-8 diagnostics bounded to 1,024 bytes. The v1 receipt
   contract preserves its existing no-job fallback guarantee.
 
+- **Session-scoped read-only TUI**: `weft tui --session <id> --project
+  <absolute-path> --read-only` shows only jobs attributed to that exact agent
+  session and verified project root while preserving logs and disabling
+  reconciliation and interactive mutations.
+
 ### Changed
 
 - **`host agent-status --json` evidence**: Schema version 2 reports the desired

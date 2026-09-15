@@ -47,6 +47,7 @@ type Model struct {
 	jobSort              jobSortMode
 	jobSelectionActive   bool // false when user has deselected the highlighted job
 	jobListContentHeight int
+	jobScope             *JobScope
 
 	// Hosts data
 	hosts           []*Host
@@ -65,6 +66,7 @@ type Model struct {
 	flash                   FlashState
 	hostSummaryTickerOffset int
 	daemonRestartInProgress bool
+	readOnly                bool
 
 	// Process stats for running jobs
 	processStats      *ssh.ProcessStats
@@ -190,6 +192,13 @@ type Model struct {
 	llmInitFn        func(*sql.DB, *config.Config) *llm.DescriptionGenerator
 }
 
+// JobScope restricts the dashboard to jobs attributed to one exact session
+// and verified project root.
+type JobScope struct {
+	SubmitterSession string
+	ProjectRoot      string
+}
+
 // ModelOptions contains configuration for the TUI model
 type ModelOptions struct {
 	SyncActiveInterval  time.Duration
@@ -201,6 +210,8 @@ type ModelOptions struct {
 	InitialSnapshot     *InitialSnapshot
 	CloudDiscoveryFn    func(*config.Config) cloudproviders.Discovery
 	LLMInitFn           func(*sql.DB, *config.Config) *llm.DescriptionGenerator
+	JobScope            *JobScope
+	ReadOnly            bool
 }
 
 // DefaultModelOptions returns the default TUI options
@@ -221,6 +232,10 @@ func NewModel(database *sql.DB) Model {
 
 // NewModelWithOptions creates a new TUI model with custom options
 func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
+	if opts.JobScope != nil {
+		opts.ReadOnly = true
+		opts.Monitor = nil
+	}
 	// Create text inputs for new job form
 	inputs := make([]textinput.Model, 7)
 
@@ -298,11 +313,11 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	// Create context for cancellation on quit
 	ctx, cancel := context.WithCancel(context.Background())
 	cloudDiscoveryFn := opts.CloudDiscoveryFn
-	if cloudDiscoveryFn == nil {
+	if cloudDiscoveryFn == nil && !opts.ReadOnly {
 		cloudDiscoveryFn = cloudproviders.Discover
 	}
 	llmInitFn := opts.LLMInitFn
-	if llmInitFn == nil {
+	if llmInitFn == nil && !opts.ReadOnly {
 		llmInitFn = defaultLLMInit
 	}
 
@@ -321,6 +336,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		jobList:                 jobList,
 		jobSelectionActive:      true,
 		jobFilter:               jobFilterRecent,
+		jobScope:                opts.JobScope,
 		jobHostFilterMode:       hostFilterRecent,
 		logViewport:             viewport.New(0, 0),
 		detailViewport:          &detailVP,
@@ -344,19 +360,24 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		lastHostSyncTimes:       make(map[string]time.Time),
 		hostSyncTimes:           make(map[string]time.Time),
 		appConfig:               appCfg,
-		showHostSummaries:       true, // Default to showing AI summaries
+		readOnly:                opts.ReadOnly,
+		showHostSummaries:       !opts.ReadOnly,
 		hostSummaries:           make(map[string]string),
 		hostSummaryHashes:       make(map[string]string),
 		hostSummaryTimes:        make(map[string]time.Time),
 		hostSummaryPending:      make(map[string]bool),
-		initialSyncNeeded:       true, // Trigger priority sync after jobs load
+		initialSyncNeeded:       !opts.ReadOnly,
 		cloudDiscoveryPending:   cloudDiscoveryFn != nil,
 		cloudDiscoveryFn:        cloudDiscoveryFn,
 		llmInitFn:               llmInitFn,
 	}
+	if opts.JobScope != nil {
+		model.jobFilter = jobFilterAll
+		model.jobHostFilterMode = hostFilterAll
+	}
 
 	if opts.InitialSnapshot != nil {
-		model.allJobs = opts.InitialSnapshot.Jobs
+		model.allJobs = filterPopulatedJobsByScope(opts.InitialSnapshot.Jobs, opts.JobScope)
 		if opts.InitialSnapshot.JobDependencies != nil {
 			model.jobDependencies = opts.InitialSnapshot.JobDependencies
 		}
@@ -372,49 +393,71 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		model.hostSyncTimes = opts.Monitor.HostSyncTimes()
 		model.applyJobFilter()
 	}
-
-	// Restore saved host filter if the host has jobs
-	state := LoadState()
-	if state.HostFilter != "" {
-		hasJobs := false
-		for _, job := range model.allJobs {
-			if job.Host == state.HostFilter {
-				hasJobs = true
-				break
+	if opts.ReadOnly {
+		for _, host := range model.hosts {
+			if host != nil && host.Status == HostStatusChecking {
+				host.Status = HostStatusUnknown
 			}
-		}
-		if hasJobs {
-			model.jobHostFilterMode = hostFilterSpecific
-			model.jobHostFilterHost = state.HostFilter
-			model.applyJobFilter()
 		}
 	}
 
-	// Create and start sync worker (with cloud clients for full reconciliation)
-	var r2Client *r2.Client
-	if appCfg != nil {
-		r2Cfg := appCfg.Vastai.R2
-		if r2Cfg.Bucket != "" && r2Cfg.AccessKeyID != "" {
-			var err error
-			r2Client, err = r2.New(r2.Config{
-				AccountID:       r2Cfg.AccountID,
-				AccessKeyID:     r2Cfg.AccessKeyID,
-				SecretAccessKey: r2Cfg.SecretAccessKey,
-				Bucket:          r2Cfg.Bucket,
-			})
-			if err != nil {
-				slog.Warn("R2 client init failed", "component", "tui", "error", err)
+	// Restore saved host filter if the host has jobs
+	// A scoped dashboard starts with the complete scoped population visible.
+	// Persisted host filters belong to the ordinary interactive dashboard.
+	if opts.JobScope == nil {
+		state := LoadState()
+		if state.HostFilter != "" {
+			hasJobs := false
+			for _, job := range model.allJobs {
+				if job.Host == state.HostFilter {
+					hasJobs = true
+					break
+				}
+			}
+			if hasJobs {
+				model.jobHostFilterMode = hostFilterSpecific
+				model.jobHostFilterHost = state.HostFilter
+				model.applyJobFilter()
 			}
 		}
 	}
-	model.syncWorker = NewSyncWorker(database, model.cloudClients, r2Client, model.appConfig)
-	model.syncWorker.Start()
+
+	if !opts.ReadOnly {
+		// Create and start sync worker (with cloud clients for full reconciliation).
+		var r2Client *r2.Client
+		if appCfg != nil {
+			r2Cfg := appCfg.Vastai.R2
+			if r2Cfg.Bucket != "" && r2Cfg.AccessKeyID != "" {
+				var err error
+				r2Client, err = r2.New(r2.Config{
+					AccountID:       r2Cfg.AccountID,
+					AccessKeyID:     r2Cfg.AccessKeyID,
+					SecretAccessKey: r2Cfg.SecretAccessKey,
+					Bucket:          r2Cfg.Bucket,
+				})
+				if err != nil {
+					slog.Warn("R2 client init failed", "component", "tui", "error", err)
+				}
+			}
+		}
+		model.syncWorker = NewSyncWorker(database, model.cloudClients, r2Client, model.appConfig)
+		model.syncWorker.Start()
+	}
 
 	return model
 }
 
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
+	if m.readOnly {
+		return tea.Batch(
+			m.refreshJobs(),
+			m.startSyncTicker(),
+			m.startLogTicker(),
+			m.startDBWatcher(),
+			m.spinner.Tick,
+		)
+	}
 	if m.monitor != nil {
 		return tea.Batch(
 			m.startMonitor(),
@@ -847,6 +890,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
 	case tickMsg:
+		if m.readOnly {
+			return m, tea.Batch(m.startSyncTicker(), m.refreshJobs())
+		}
 		cmds := []tea.Cmd{m.startSyncTicker()}
 		if m.monitor == nil {
 			if cmd := m.ensureCurrentDaemonForTick(); cmd != nil {
@@ -879,7 +925,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.monitor.WatchJobStats(nil)
 			}
 		}
-		if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.Backend == db.BackendSkyPilot {
+		if m.detailTab == DetailTabLogs && m.selectedJob != nil &&
+			(m.monitor == nil || m.selectedJob.Backend == db.BackendSkyPilot) {
 			cmds = append(cmds, m.fetchSelectedJobLog())
 		}
 		return m, tea.Batch(cmds...)

@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"time"
@@ -16,9 +17,47 @@ import (
 
 var skyClientForDashboard = skypilot.Client{}
 
+// FilterJobsByScope populates stable attribution fields and returns only jobs
+// whose stored session and project root exactly match scope. A non-nil scope
+// always narrows; zero matches never fall back to the input.
+func FilterJobsByScope(database *sql.DB, jobs []*db.Job, scope *JobScope) ([]*db.Job, error) {
+	if scope == nil {
+		return jobs, nil
+	}
+	if err := db.PopulateSubmitterSessions(database, jobs); err != nil {
+		return nil, err
+	}
+	if err := db.PopulateProjectRoots(database, jobs); err != nil {
+		return nil, err
+	}
+	return filterPopulatedJobsByScope(jobs, scope), nil
+}
+
+func filterPopulatedJobsByScope(jobs []*db.Job, scope *JobScope) []*db.Job {
+	if scope == nil {
+		return jobs
+	}
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil &&
+			job.SubmitterSession == scope.SubmitterSession &&
+			job.ProjectRoot == scope.ProjectRoot {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
+func listJobsForScope(database *sql.DB, scope *JobScope, limit int) ([]*db.Job, error) {
+	if scope == nil {
+		return db.ListJobs(database, "", "", limit, nil, "")
+	}
+	return db.ListJobsByAttribution(database, scope.SubmitterSession, scope.ProjectRoot, limit)
+}
+
 func (m Model) refreshJobs() tea.Cmd {
 	return func() tea.Msg {
-		jobs, err := db.ListJobs(m.database, "", "", 1000, nil, "")
+		jobs, err := listJobsForScope(m.database, m.jobScope, 1000)
 		if err != nil {
 			return jobsRefreshedMsg{err: err}
 		}

@@ -1,6 +1,10 @@
 package cmd
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestResolveTUIMode(t *testing.T) {
 	tests := []struct {
@@ -110,5 +114,56 @@ func TestInAgentContextWithTerminal(t *testing.T) {
 	t.Setenv("CLAUDECODE", "1")
 	if got := inAgentContextWithTerminal(true); !got {
 		t.Fatal("expected CLAUDECODE to force agent context even in terminal")
+	}
+}
+
+func TestResolveTUIJobScopeRequiresCompleteReadOnlyScope(t *testing.T) {
+	scope, err := resolveTUIJobScope("", "", false)
+	if err != nil || scope != nil {
+		t.Fatalf("default scope = (%+v, %v), want (nil, nil)", scope, err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		session  string
+		project  string
+		readOnly bool
+	}{
+		{name: "session only", session: "session-a"},
+		{name: "project only", project: "/tmp/project"},
+		{name: "read only only", readOnly: true},
+		{name: "missing read only", session: "session-a", project: "/tmp/project"},
+		{name: "relative project", session: "session-a", project: "project", readOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := resolveTUIJobScope(tc.session, tc.project, tc.readOnly); err == nil {
+				t.Fatal("resolveTUIJobScope returned nil error")
+			}
+		})
+	}
+
+	scope, err = resolveTUIJobScope(" session-a ", "/tmp/project/../project", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.SubmitterSession != "session-a" || scope.ProjectRoot != "/tmp/project" {
+		t.Fatalf("scope = %+v", scope)
+	}
+
+	realProject := t.TempDir()
+	projectAlias := filepath.Join(t.TempDir(), "project-alias")
+	if err := os.Symlink(realProject, projectAlias); err != nil {
+		t.Fatal(err)
+	}
+	scope, err = resolveTUIJobScope("session-a", projectAlias, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(realProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.ProjectRoot != wantRoot {
+		t.Fatalf("symlinked project root = %q, want %q", scope.ProjectRoot, wantRoot)
 	}
 }

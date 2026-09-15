@@ -149,6 +149,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.readOnly && isReadOnlyMutationKey(msg) {
+		return m, m.setFlash("Read-only mode: action disabled", true)
+	}
+
 	// Allow cancelling job creation with Escape
 	if m.creatingJob && key.Matches(msg, keys.Escape) {
 		m.creatingJob = false
@@ -666,6 +670,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.fetchQueuedJobEnv(job)
 
 	case key.Matches(msg, keys.Sync):
+		if m.readOnly {
+			return m, tea.Batch(m.setFlash("Refreshed local job state", false), m.refreshJobs())
+		}
 		if m.viewMode == ViewModeJobs && m.syncWorker != nil {
 			// Request high-priority sync for all hosts
 			m.requestSyncAllHosts(true)
@@ -720,6 +727,27 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func isReadOnlyMutationKey(msg tea.KeyMsg) bool {
+	return key.Matches(msg,
+		keys.EditRestart,
+		keys.Kill,
+		keys.Pause,
+		keys.Draft,
+		keys.Restart,
+		keys.Retry,
+		keys.Remove,
+		keys.NewJob,
+		keys.Prune,
+		keys.StartQueue,
+		keys.StartNow,
+		keys.MoveToFront,
+		keys.Edit,
+		keys.RegenerateDesc,
+		keys.ToggleSummaries,
+		keys.Cloud,
+	)
 }
 
 func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
