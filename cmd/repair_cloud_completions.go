@@ -13,15 +13,15 @@ import (
 
 var repairCloudCompletionsNestedCmd = &cobra.Command{
 	Use:   "cloud-completions",
-	Short: "Re-arm cloud completion backfill for jobs poisoned by sync-time end_time",
-	Long: `Clear last_synced_status on terminal cloud jobs whose start_time is 0
-and end_time is set. These rows are the signature of an earlier marker-only
-sync that fabricated end_time = wall-clock instead of using the agent's
-completion JSON. Clearing last_synced_status arms NeedsCloudCompletionBackfill
-so an explicit R2 repair sweep can rewrite start_time/end_time from R2.
+	Short: "Repair incomplete cloud completion metadata",
+	Long: `Re-arm terminal cloud jobs whose start_time is 0 and end_time is set.
+These rows carry timestamps created by an earlier marker-only sync rather than
+the agent's authoritative completion JSON. Clearing last_synced_status makes
+them eligible for completion backfill.
 
-Idempotent: gates on start_time = 0, so repeated runs do nothing once the
-authoritative timestamps have been ingested.`,
+With --sync-r2, run the explicit historical completion sweep after re-arming.
+The sweep covers incomplete terminal attempts outside the automatic 24-hour
+routine-sync window and may scan historical R2 job prefixes.`,
 	Args: usageArgs(cobra.NoArgs),
 	RunE: runRepairCloudCompletions,
 }

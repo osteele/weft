@@ -203,6 +203,9 @@ config {
     r2_marker_timeout: Duration = 3.seconds
     -- Sustained, confirmed queue-worker absence before unresolved status.
     queue_outcome_unknown_bound: Duration = 15.minutes
+    -- Automatic exact-key retries for incomplete terminal completions.
+    -- Older attempts remain eligible for explicit historical repair.
+    routine_completion_backfill_window: Duration = 24.hours
 
     -- External scheduler status query timeout. This keeps SkyPilot refreshes
     -- from blocking TUI/list updates behind cloud-provider or SSH sync work.
@@ -1137,11 +1140,17 @@ rule SyncActiveCloudAttemptsFromR2 {
                 -- Instance/agent may still be producing or uploading markers.
                 j.latest_attempt.launch.status in {launching, running, paused, grace}
                 or (
-                    -- One bounded cleanup pass for latest terminal attempts
-                    -- whose completion metadata has not been fully ingested.
+                    -- Retry incomplete terminal completion metadata for a
+                    -- bounded interval after the producing launch ends.
                     j.is_terminal
                     and j.needs_completion_backfill
                     and j.latest_attempt.id = j.latest_run_id
+                    and (j.latest_attempt.launch.ended_at ??
+                         (if j.latest_attempt.end_time > 0:
+                              j.latest_attempt.end_time
+                          else: null) ??
+                         j.latest_attempt.launch.created_at)
+                        >= now - config.routine_completion_backfill_window
                 )
             ))
 
@@ -1187,9 +1196,11 @@ rule SyncActiveCloudAttemptsFromR2 {
         -- before building the agent payload. See R2RunIDFromDB invariant.
         --
         -- Automatic sync does not fall back to a bucket-wide or job-prefix
-        -- scan when the expected key is absent. Run-id mismatch recovery and
-        -- old historical artifact archaeology belong to explicit repair.
-        -- See RepairHistoricalCloudCompletions.
+        -- scan when the expected key is absent. Terminal attempts leave the
+        -- routine candidate set after routine_completion_backfill_window
+        -- without being marked synced; run-id mismatch recovery and older
+        -- completion metadata belong to explicit repair. See
+        -- RepairHistoricalCloudCompletions.
 }
 
 -- Explicit repair path for historical or run-id-mismatched R2 completions.

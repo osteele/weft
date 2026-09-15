@@ -56,42 +56,77 @@ func TestRecordCloudDownloadObservationSkipsCachedPrewarm(t *testing.T) {
 	}
 }
 
-func TestListCloudAttemptSyncCandidates_AttemptScoped(t *testing.T) {
+func TestListCloudAttemptSyncCandidates_AttemptScopedAndTimeBounded(t *testing.T) {
 	database := db.SetupTestDB(t)
+	now := time.Unix(time.Now().Unix(), 0)
+	recent := now.Add(-routineCompletionBackfillLookback / 2).Unix()
+	cutoff := now.Add(-routineCompletionBackfillLookback).Unix()
+	historical := now.Add(-2 * routineCompletionBackfillLookback).Unix()
 
 	liveQueuedJobID, liveQueuedRunID := createPlacedCloudJob(t, database, db.LaunchStatusRunning)
 	terminalQueuedJobID, _ := createPlacedCloudJob(t, database, db.LaunchStatusFailed)
 	syncedCompletedJobID, syncedCompletedRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
-	incompleteCompletedJobID, incompleteCompletedRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	recentIncompleteJobID, recentIncompleteRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	boundaryIncompleteJobID, boundaryIncompleteRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	historicalIncompleteJobID, historicalIncompleteRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	missingEndedAtJobID, missingEndedAtRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	recentUnknownEndJobID, recentUnknownEndRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	historicalUnknownEndJobID, historicalUnknownEndRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+
+	setCloudLaunchTimestamps(t, database, liveQueuedJobID, historical, nil)
+	setCloudLaunchTimestamps(t, database, terminalQueuedJobID, recent, &recent)
+	setCloudLaunchTimestamps(t, database, syncedCompletedJobID, recent, &recent)
+	setCloudLaunchTimestamps(t, database, recentIncompleteJobID, recent, &recent)
+	setCloudLaunchTimestamps(t, database, boundaryIncompleteJobID, cutoff, &cutoff)
+	setCloudLaunchTimestamps(t, database, historicalIncompleteJobID, historical, &historical)
+	setCloudLaunchTimestamps(t, database, missingEndedAtJobID, historical, nil)
+	setCloudLaunchTimestamps(t, database, recentUnknownEndJobID, recent, nil)
+	setCloudLaunchTimestamps(t, database, historicalUnknownEndJobID, historical, nil)
 
 	setCloudAttemptTerminal(t, database, syncedCompletedRunID, db.StatusCompleted, true)
-	setCloudAttemptTerminal(t, database, incompleteCompletedRunID, db.StatusCompleted, false)
+	setCloudAttemptTerminal(t, database, recentIncompleteRunID, db.StatusCompleted, false)
+	setCloudAttemptTerminal(t, database, boundaryIncompleteRunID, db.StatusCompleted, false)
+	setCloudAttemptTerminal(t, database, historicalIncompleteRunID, db.StatusCompleted, false)
+	setCloudAttemptTerminal(t, database, missingEndedAtRunID, db.StatusCompleted, false)
+	setCloudAttemptTerminal(t, database, recentUnknownEndRunID, db.StatusCompleted, false)
+	setCloudAttemptTerminal(t, database, historicalUnknownEndRunID, db.StatusCompleted, false)
+	setCloudAttemptEndTime(t, database, recentUnknownEndRunID, 0)
+	setCloudAttemptEndTime(t, database, historicalUnknownEndRunID, 0)
 
-	candidates, err := listCloudAttemptSyncCandidates(database)
+	candidates, err := listCloudAttemptSyncCandidates(database, now)
 	if err != nil {
 		t.Fatalf("listCloudAttemptSyncCandidates: %v", err)
 	}
 	got := make(map[int64]cloudAttemptSyncCandidate, len(candidates))
-	for _, c := range candidates {
-		got[c.JobID] = c
+	for _, candidate := range candidates {
+		got[candidate.JobID] = candidate
+	}
+	requireCandidate := func(jobID, runID int64) {
+		t.Helper()
+		candidate, ok := got[jobID]
+		if !ok {
+			t.Fatalf("job %d missing from candidates: %+v", jobID, candidates)
+		}
+		if candidate.RunID != runID {
+			t.Fatalf("job %d run_id = %d, want %d", jobID, candidate.RunID, runID)
+		}
+	}
+	requireExcluded := func(jobID int64) {
+		t.Helper()
+		if _, ok := got[jobID]; ok {
+			t.Fatalf("job %d unexpectedly included in candidates: %+v", jobID, candidates)
+		}
 	}
 
-	if c, ok := got[liveQueuedJobID]; !ok {
-		t.Fatalf("live queued job %d missing from candidates: %+v", liveQueuedJobID, candidates)
-	} else if c.RunID != liveQueuedRunID {
-		t.Fatalf("live queued run_id = %d, want %d", c.RunID, liveQueuedRunID)
-	}
-	if _, ok := got[terminalQueuedJobID]; ok {
-		t.Fatalf("queued job on terminal launch %d included; candidates: %+v", terminalQueuedJobID, candidates)
-	}
-	if _, ok := got[syncedCompletedJobID]; ok {
-		t.Fatalf("fully synced terminal job %d included; candidates: %+v", syncedCompletedJobID, candidates)
-	}
-	if c, ok := got[incompleteCompletedJobID]; !ok {
-		t.Fatalf("incomplete terminal job %d missing from candidates: %+v", incompleteCompletedJobID, candidates)
-	} else if c.RunID != incompleteCompletedRunID {
-		t.Fatalf("incomplete terminal run_id = %d, want %d", c.RunID, incompleteCompletedRunID)
-	}
+	requireCandidate(liveQueuedJobID, liveQueuedRunID)
+	requireCandidate(recentIncompleteJobID, recentIncompleteRunID)
+	requireCandidate(boundaryIncompleteJobID, boundaryIncompleteRunID)
+	requireCandidate(missingEndedAtJobID, missingEndedAtRunID)
+	requireCandidate(recentUnknownEndJobID, recentUnknownEndRunID)
+	requireExcluded(terminalQueuedJobID)
+	requireExcluded(syncedCompletedJobID)
+	requireExcluded(historicalIncompleteJobID)
+	requireExcluded(historicalUnknownEndJobID)
 }
 
 func TestTerminalCompletionStillRefreshesStandalonePublication(t *testing.T) {
@@ -218,6 +253,22 @@ func createPlacedCloudJob(t *testing.T, database *sql.DB, finalLaunchStatus stri
 	return jobID, runID
 }
 
+func setCloudLaunchTimestamps(t *testing.T, database *sql.DB, jobID, createdAt int64, endedAt *int64) {
+	t.Helper()
+	var endedAtValue any
+	if endedAt != nil {
+		endedAtValue = *endedAt
+	}
+	if _, err := database.Exec(
+		`UPDATE launches
+		 SET created_at = ?, ended_at = ?
+		 WHERE id = (SELECT launch_id FROM job_status WHERE id = ?)`,
+		createdAt, endedAtValue, jobID,
+	); err != nil {
+		t.Fatalf("set launch timestamps for job %d: %v", jobID, err)
+	}
+}
+
 func setCloudAttemptTerminal(t *testing.T, database *sql.DB, runID int64, jobStatus string, completeMetadata bool) {
 	t.Helper()
 	now := time.Now().Unix()
@@ -236,6 +287,16 @@ func setCloudAttemptTerminal(t *testing.T, database *sql.DB, runID int64, jobSta
 		jobStatus, startTime, endTime, exitCode, lastSyncedStatus, runID,
 	); err != nil {
 		t.Fatalf("set terminal attempt: %v", err)
+	}
+}
+
+func setCloudAttemptEndTime(t *testing.T, database *sql.DB, runID, endTime int64) {
+	t.Helper()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET end_time = ? WHERE id = ?`,
+		endTime, runID,
+	); err != nil {
+		t.Fatalf("set end time for attempt %d: %v", runID, err)
 	}
 }
 

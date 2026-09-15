@@ -39,6 +39,11 @@ const (
 	syncJobMarkerParallel = 10
 )
 
+// routineCompletionBackfillLookback bounds automatic retries for terminal
+// attempts whose authoritative completion metadata has not arrived. Older
+// attempts remain eligible for the explicit historical repair sweep.
+const routineCompletionBackfillLookback = 24 * time.Hour
+
 type CloudJobResultsOptions struct {
 	SyncOpslogs bool
 }
@@ -354,7 +359,7 @@ type cloudAttemptSyncCandidate struct {
 }
 
 func syncCurrentCloudJobResults(ctx context.Context, database *sql.DB, r2Client *r2.Client, verbose bool) (int, map[int64]struct{}) {
-	candidates, err := listCloudAttemptSyncCandidates(database)
+	candidates, err := listCloudAttemptSyncCandidates(database, time.Now())
 	if err != nil {
 		if verbose {
 			fmt.Fprintf(os.Stderr, "Warning: list cloud job sync candidates: %v\n", err)
@@ -507,7 +512,8 @@ func syncTargetedAttemptPublication(ctx context.Context, r2Client *r2.Client, da
 	syncAttemptPublicationReport(ctx, r2Client, database, jobID, runID.Int64)
 }
 
-func listCloudAttemptSyncCandidates(database *sql.DB) ([]cloudAttemptSyncCandidate, error) {
+func listCloudAttemptSyncCandidates(database *sql.DB, now time.Time) ([]cloudAttemptSyncCandidate, error) {
+	terminalCutoff := now.Add(-routineCompletionBackfillLookback).Unix()
 	rows, err := database.Query(`
 		SELECT js.id, COALESCE(js.latest_run_id, 0), js.status, js.launch_id, l.status,
 		       js.start_time, js.end_time, js.exit_code, js.last_synced_status
@@ -517,11 +523,15 @@ func listCloudAttemptSyncCandidates(database *sql.DB) ([]cloudAttemptSyncCandida
 		  AND js.launch_id IS NOT NULL
 		  AND (
 		    js.status IN (?, ?, ?, ?)
-		    OR js.status IN (?, ?, ?, ?, ?)
+		    OR (
+		      js.status IN (?, ?, ?, ?)
+		      AND COALESCE(l.ended_at, NULLIF(js.end_time, 0), l.created_at) >= ?
+		    )
 		  )
 		ORDER BY js.id`,
 		db.StatusQueued, db.StatusStarting, db.StatusRunning, db.StatusPaused,
-		db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled,
+		db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled,
+		terminalCutoff,
 	)
 	if err != nil {
 		return nil, err
@@ -548,7 +558,7 @@ func listCloudAttemptSyncCandidates(database *sql.DB) ([]cloudAttemptSyncCandida
 			if db.IsLiveLaunchStatus(c.LaunchStatus) {
 				candidates = append(candidates, c)
 			}
-		case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled:
+		case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled:
 			if cloudAttemptNeedsCompletionBackfill(c.Status, startTime, endTime, exitCode, lastSyncedStatus) {
 				candidates = append(candidates, c)
 			}

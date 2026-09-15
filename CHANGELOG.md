@@ -26,6 +26,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Bounded cloud completion sync**: Routine sync retries incomplete terminal
+  completion metadata for 24 hours after a launch ends. Older rows remain
+  eligible for the explicit historical R2 repair sweep without consuming every
+  daemon pass.
 - **CLI completion with pending hooks**: Commands exit without draining the
   lifecycle-hook backlog. The daemon retains responsibility for durable retries,
   so slow hooks do not delay completed JSON queries.
