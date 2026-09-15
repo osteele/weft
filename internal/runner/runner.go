@@ -56,14 +56,15 @@ type Runner struct {
 	// finalizingWorkdirs gates reuse while a terminal attempt is being handed
 	// to the post-job manager. It is deliberately separate from Running: a
 	// blocked publication admission must not retain CPU/GPU scheduler capacity.
-	finalizingWorkdirs map[string]int
-	processesMu        sync.Mutex
-	lastSampleTime     time.Time
-	restartRequested   bool
-	restartEnv         []string
-	nowFunc            func() time.Time
-	AgentVersion       string
-	Capabilities       []string
+	finalizingWorkdirs  map[string]int
+	processesMu         sync.Mutex
+	lastSampleTime      time.Time
+	restartRequested    bool
+	restartEnv          []string
+	nowFunc             func() time.Time
+	AgentVersion        string
+	Capabilities        []string
+	ArtifactNeedVersion int
 
 	// Benchmark tracking
 	benchmarkIdleCount  int
@@ -201,7 +202,7 @@ func (r *Runner) Run() error {
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
-	r.state.SetCapabilities(r.Capabilities)
+	r.state.SetCapabilities(r.Capabilities, r.ArtifactNeedVersion)
 	r.state.SetAgentIdentity(r.AgentVersion, opsqueue.QueueProtocolVersion)
 	r.saveState()
 

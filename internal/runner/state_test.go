@@ -81,7 +81,7 @@ func TestState_SaveLoad(t *testing.T) {
 	path := filepath.Join(dir, "state.json")
 
 	s := NewState()
-	s.SetCapabilities([]string{opsqueue.CapabilityJobPayloadV1})
+	s.SetCapabilities([]string{opsqueue.CapabilityJobPayloadV1}, opsqueue.ArtifactNeedVersionProducerArtifacts)
 	s.SetAgentIdentity("abc123def456", opsqueue.QueueProtocolVersion)
 	s.Cursor = "2024-01-01T00:00:00Z"
 	s.CursorLine = 5
@@ -113,6 +113,10 @@ func TestState_SaveLoad(t *testing.T) {
 	}
 	if !slices.Contains(loaded.Capabilities, opsqueue.CapabilityJobPayloadV1) {
 		t.Fatalf("capabilities = %v", loaded.Capabilities)
+	}
+	if loaded.ArtifactNeedVersion != opsqueue.ArtifactNeedVersionProducerArtifacts {
+		t.Fatalf("artifact need version = %d, want %d; the version must survive a state round-trip or the controller reads a corrected runner as named-assets-only",
+			loaded.ArtifactNeedVersion, opsqueue.ArtifactNeedVersionProducerArtifacts)
 	}
 	if loaded.AgentVersion != "abc123def456" {
 		t.Errorf("agent_version = %q, want abc123def456", loaded.AgentVersion)

@@ -23,6 +23,19 @@ const (
 const CapabilityJobPayloadV1 = "job-payload-v1"
 const CapabilityArtifactNeedV1 = "artifact-need-v1"
 
+// Artifact-need shapes a runner can satisfy. The capability string says only
+// that a runner fetches needs from R2 at all; it cannot distinguish which
+// shapes it understands, because it was published before producer artifacts
+// were one of them. The version field carries that.
+//
+// A runner advertising CapabilityArtifactNeedV1 without the field is an agent
+// built before producer support and is treated as named-assets-only, which is
+// what it is.
+const (
+	ArtifactNeedVersionNamedAssets       = 1
+	ArtifactNeedVersionProducerArtifacts = 2
+)
+
 // QueueProtocolVersion is the highest queue command schema this agent
 // understands. Version 0 is the legacy unversioned schema.
 const QueueProtocolVersion = 1
@@ -251,6 +264,7 @@ type RunnerState struct {
 	QueueProtocolVersion            int                            `json:"queue_protocol_version,omitempty"`
 	UpdatedAt                       int64                          `json:"updated_at,omitempty"`
 	Capabilities                    []string                       `json:"capabilities,omitempty"`
+	ArtifactNeedVersion             int                            `json:"artifact_need_version,omitempty"`
 	Cursor                          string                         `json:"cursor"`
 	CursorLine                      int                            `json:"cursor_line"`
 	Pending                         []int64                        `json:"pending"`
@@ -261,6 +275,20 @@ type RunnerState struct {
 	PendingPayloads                 map[string]RunnerPayloadState  `json:"pending_payloads,omitempty"`
 	PendingPayloadInventoryComplete bool                           `json:"pending_payload_inventory_complete,omitempty"`
 	PendingPayloadInventoryError    string                         `json:"pending_payload_inventory_error,omitempty"`
+}
+
+// SupportsArtifactNeedVersion reports whether the runner can satisfy artifact
+// needs of the given shape version. An agent that advertises the capability but
+// predates the version field satisfies version 1 only.
+func (s *RunnerState) SupportsArtifactNeedVersion(version int) bool {
+	if s == nil || !s.Supports(CapabilityArtifactNeedV1) {
+		return false
+	}
+	advertised := s.ArtifactNeedVersion
+	if advertised == 0 {
+		advertised = ArtifactNeedVersionNamedAssets
+	}
+	return advertised >= version
 }
 
 func (s *RunnerState) Supports(capability string) bool {

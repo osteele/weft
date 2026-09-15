@@ -510,15 +510,13 @@ func applyQueueToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 	if err != nil {
 		return err
 	}
-	if hostUsesR2Queue(job.Host) {
-		if hasNonNamedAssetNeed(job.Needs) {
-			return fmt.Errorf("R2-pull inventory hosts do not yet stage producer-job --needs artifacts")
+	if !hostUsesR2Queue(job.Host) {
+		if failures := queueNeedsStager(database, job.Host, []*db.Job{job}, timeout, defaultR2Client); len(failures) > 0 {
+			if err := failures[job.ID]; err != nil {
+				return fmt.Errorf("stage artifact needs: %w", err)
+			}
+			return fmt.Errorf("stage artifact needs: unknown failure")
 		}
-	} else if failures := queueNeedsStager(database, job.Host, []*db.Job{job}, timeout, defaultR2Client); len(failures) > 0 {
-		if err := failures[job.ID]; err != nil {
-			return fmt.Errorf("stage artifact needs: %w", err)
-		}
-		return fmt.Errorf("stage artifact needs: unknown failure")
 	}
 	return queueAppender(database, job, timeout, sourceSHA256, "")
 }

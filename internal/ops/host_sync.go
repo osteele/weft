@@ -1040,12 +1040,6 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 	stageFailures := make(map[int64]error)
 	if !hostUsesR2Queue(host) {
 		stageFailures = stageArtifactNeedsForHost(database, host, allQueued, timeout, getR2Client)
-	} else {
-		for _, job := range allQueued {
-			if job != nil && hasNonNamedAssetNeed(job.Needs) {
-				stageFailures[job.ID] = fmt.Errorf("R2-pull inventory hosts do not yet stage producer-job --needs artifacts")
-			}
-		}
 	}
 	for jobID, err := range stageFailures {
 		syncLog.Debug("artifact needs staging failed", "job_id", jobID, "host", host, "error", err)
@@ -1413,7 +1407,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 				syncLog.Debug("per-job source marker write failed", "job_id", job.ID, "working_dir", job.WorkingDir, "host", job.Host, "error", err)
 			}
 		}
-		if err := appendJobToQueueWithSourceManifest(database, job, timeout, sourceSHA256, sourceR2Key, nil, state); err != nil {
+		if err := appendJobToQueueWithSourceManifest(database, job, timeout, sourceSHA256, sourceR2Key, nil, state, getR2Client); err != nil {
 			if ssh.IsConnectionError(err.Error()) {
 				recordDeferred(job.ID, "queue append deferred (host unreachable)", err)
 				return ensured, contacted, nil
@@ -1603,9 +1597,9 @@ type pendingNeed struct {
 	preResolvedR2Key string
 }
 
-// collectPendingNeeds parses one job's --needs and returns a pendingNeed for
-// each rental-producer entry (on-prem producers are skipped — their satisfied
-// marker is written by the producer's own queue runner). No SSH or R2 IO.
+// collectPendingNeeds parses one job's --needs without SSH or R2 IO.
+// SSH consumers skip inventory producers whose runner writes the satisfied
+// marker; R2-pull consumers need explicit keys even for inventory producers.
 func collectPendingNeeds(database *sql.DB, job *db.Job) ([]pendingNeed, error) {
 	if job == nil || len(job.Needs) == 0 || strings.TrimSpace(job.Host) == "" {
 		return nil, nil
@@ -1642,7 +1636,7 @@ func collectPendingNeeds(database *sql.DB, job *db.Job) ([]pendingNeed, error) {
 		if producer == nil {
 			return nil, fmt.Errorf("producer job %s for %q not found", ids.FormatJobID(parsed.Version), spec)
 		}
-		if producer.HasInventoryHost() {
+		if producer.HasInventoryHost() && !hostUsesR2Queue(job.Host) {
 			continue
 		}
 		pending = append(pending, pendingNeed{
@@ -1702,18 +1696,45 @@ func resolveNamedAssetNeeds(database *sql.DB, specs []string) ([]opsqueue.Artifa
 	return needs, nil
 }
 
+// resolveR2QueueNeeds resolves every need before publishing an R2-pull entry.
+// Producer keys require existence probes; named assets need only a DB lookup.
+func resolveR2QueueNeeds(database *sql.DB, job *db.Job, getR2Client func() (*r2.Client, error)) ([]opsqueue.ArtifactNeed, error) {
+	pending, err := collectPendingNeeds(database, job)
+	if err != nil {
+		return nil, err
+	}
+	var client *r2.Client
+	var needs []opsqueue.ArtifactNeed
+	for _, n := range pending {
+		key := n.preResolvedR2Key
+		if key == "" {
+			if client == nil {
+				client, err = getR2Client()
+				if err != nil {
+					return nil, fmt.Errorf("resolve --needs %q: %w", n.spec, err)
+				}
+				if client == nil || !client.IsConfigured() {
+					return nil, fmt.Errorf("resolve --needs %q: R2 is not configured", n.spec)
+				}
+			}
+			key, err = r2resolve.NeedR2Key(context.Background(), client, n.producerID, n.latestRun, n.path)
+			if errors.Is(err, r2resolve.ErrArtifactMissing) {
+				return nil, fmt.Errorf("producer job %s artifact %q is not in R2 yet: %w", ids.FormatJobID(n.producerID), n.path, err)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("resolve --needs %q: %w", n.spec, err)
+			}
+		}
+		needs = append(needs, opsqueue.ArtifactNeed{
+			Spec: n.spec, Path: n.path, R2Key: key, ContentType: n.contentType,
+		})
+	}
+	return needs, nil
+}
+
 func hasNamedAssetNeed(specs []string) bool {
 	for _, spec := range specs {
 		if _, ok := parseAssetNeedSpec(spec); ok {
-			return true
-		}
-	}
-	return false
-}
-
-func hasNonNamedAssetNeed(specs []string) bool {
-	for _, spec := range specs {
-		if _, ok := parseAssetNeedSpec(spec); !ok {
 			return true
 		}
 	}
@@ -2255,4 +2276,16 @@ func scanHFCacheDuringSync(database *sql.DB, host string, timeout time.Duration)
 func capabilityRemedy(host, capability string) string {
 	return opsqueue.MissingRunnerCapabilityBlockDetail(capability,
 		fmt.Sprintf("run `weft queue update %s` to deploy a current agent", host))
+}
+
+// needsProducerArtifact reports whether any resolved need refers to another
+// job's output rather than a named asset. Named assets are satisfiable by every
+// runner advertising the artifact-need capability; producer artifacts are not.
+func needsProducerArtifact(needs []opsqueue.ArtifactNeed) bool {
+	for _, need := range needs {
+		if _, ok := parseAssetNeedSpec(need.Spec); !ok {
+			return true
+		}
+	}
+	return false
 }

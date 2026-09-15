@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -41,10 +42,10 @@ func AppendJobToQueueWithSourceAndR2(database *sql.DB, job *db.Job, timeout time
 		return fmt.Errorf("read queue runner protocol: %w", err)
 	}
 	recordHostAgentRuntimeObservation(database, job.Host, state, time.Now())
-	return appendJobToQueueWithSourceManifest(database, job, timeout, sourceSHA256, sourceR2Key, nil, state)
+	return appendJobToQueueWithSourceManifest(database, job, timeout, sourceSHA256, sourceR2Key, nil, state, defaultR2Client)
 }
 
-func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string, sourceManifest *opsqueue.SourceManifest, state *opsqueue.RunnerState) error {
+func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string, sourceManifest *opsqueue.SourceManifest, state *opsqueue.RunnerState, getR2Client func() (*r2.Client, error)) error {
 	if err := queueProtocolCompatibilityError(job.Host, state); err != nil {
 		return err
 	}
@@ -69,7 +70,12 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 		return fmt.Errorf("list job payloads: %w", err)
 	}
 	artifactNeeds := []opsqueue.ArtifactNeed(nil)
-	if hostUsesR2Queue(job.Host) || sourceManifest != nil || sourceR2Key != "" {
+	if hostUsesR2Queue(job.Host) {
+		artifactNeeds, err = resolveR2QueueNeeds(database, job, getR2Client)
+		if err != nil {
+			return err
+		}
+	} else if sourceManifest != nil || sourceR2Key != "" {
 		artifactNeeds, err = resolveNamedAssetNeeds(database, job.Needs)
 		if err != nil {
 			return err
@@ -79,6 +85,18 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 		return errors.New(opsqueue.MissingRunnerCapabilityBlockDetail(
 			opsqueue.CapabilityArtifactNeedV1,
 			"agent update required before dispatch",
+		))
+	}
+	// The capability string predates producer artifacts, so a runner that
+	// advertises it may still understand named assets only. Gate the newer
+	// shape on the version rather than the string: without this, an agent that
+	// has not been redeployed accepts a producer need it cannot satisfy and the
+	// job waits on a marker nothing will write.
+	if needsProducerArtifact(artifactNeeds) &&
+		!state.SupportsArtifactNeedVersion(opsqueue.ArtifactNeedVersionProducerArtifacts) {
+		return errors.New(opsqueue.MissingRunnerCapabilityBlockDetail(
+			"artifact-need producer artifacts",
+			"redeploy the agent on this host: weft deploy-agent",
 		))
 	}
 	command := payloadGuardedCommand(job.Command, payloads)

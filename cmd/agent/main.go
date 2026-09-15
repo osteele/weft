@@ -135,6 +135,7 @@ func runQueue(args []string) {
 	}
 	if r.EnsureArtifactNeedsFromR2 != nil {
 		r.Capabilities = append(r.Capabilities, opsqueue.CapabilityArtifactNeedV1)
+		r.ArtifactNeedVersion = opsqueue.ArtifactNeedVersionProducerArtifacts
 	}
 	if parsed.R2QueueHost != "" {
 		if parsed.R2Bucket == "" {

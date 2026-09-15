@@ -21,6 +21,7 @@ type State struct {
 	QueueProtocolVersion int                         `json:"queue_protocol_version,omitempty"`
 	UpdatedAt            int64                       `json:"updated_at,omitempty"`
 	Capabilities         []string                    `json:"capabilities,omitempty"`
+	ArtifactNeedVersion  int                         `json:"artifact_need_version,omitempty"`
 	Cursor               string                      `json:"cursor"`
 	CursorLine           int                         `json:"cursor_line"`
 	Pending              []int64                     `json:"pending"`
@@ -36,9 +37,10 @@ type State struct {
 	StopRequested bool `json:"-"`
 }
 
-func (s *State) SetCapabilities(capabilities []string) {
+func (s *State) SetCapabilities(capabilities []string, artifactNeedVersion int) {
 	s.mu.Lock()
 	s.Capabilities = slices.Clone(capabilities)
+	s.ArtifactNeedVersion = artifactNeedVersion
 	s.mu.Unlock()
 }
 

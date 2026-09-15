@@ -58,7 +58,7 @@ func hasCUDAEnvVar(envVars []string) bool {
 }
 
 // queueEntryForJob rebuilds the canonical queue entry for a queued job.
-// Payloads and named-asset needs are re-read from the database and their
+// Payloads and artifact needs are re-read from the database and their
 // fail-closed command guards re-applied, so every rebuilt entry (describe
 // edits, deferred updates, requeues) stages exactly what admission accepted.
 func queueEntryForJob(database *sql.DB, job *db.Job, envVars []string, depSpec string) (opsqueue.QueueEntry, error) {
@@ -68,7 +68,7 @@ func queueEntryForJob(database *sql.DB, job *db.Job, envVars []string, depSpec s
 	}
 	artifactNeeds := []opsqueue.ArtifactNeed(nil)
 	if hostUsesR2Queue(job.Host) {
-		artifactNeeds, err = resolveNamedAssetNeeds(database, job.Needs)
+		artifactNeeds, err = resolveR2QueueNeeds(database, job, defaultR2Client)
 		if err != nil {
 			return opsqueue.QueueEntry{}, err
 		}

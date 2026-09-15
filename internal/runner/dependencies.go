@@ -90,10 +90,16 @@ func checkDependencies(depsSpec string, needs []string, stageable []opsqueue.Art
 			return DepCheckResult{Result: DepWaiting}
 		}
 
+		// A need the controller resolved into a stageable ArtifactNeed is
+		// fetched from R2 by this runner before the job starts, so it waits on
+		// no marker. That is true whichever shape the need has; keying it to
+		// named assets stranded producer needs, which then waited forever for
+		// a marker only the producer's own runner writes — on another host.
+		if artifactNeedIsStageable(spec, stageable) {
+			continue
+		}
+
 		if parsed.IsAsset() {
-			if artifactNeedIsStageable(spec, stageable) {
-				continue
-			}
 			satisfiedPath := NamedAssetSatisfiedFile(logDir, parsed.AssetName)
 			exitCode, found := ReadStatusFile(satisfiedPath)
 			if !found {
@@ -139,10 +145,12 @@ func writeArtifactNeedSatisfiedMarkers(logDir string, needs []opsqueue.ArtifactN
 		if err != nil {
 			return fmt.Errorf("parse artifact need %q: %w", need.Spec, err)
 		}
-		if !parsed.IsAsset() {
-			return fmt.Errorf("artifact need %q is not a named asset", need.Spec)
+		var marker string
+		if parsed.IsAsset() {
+			marker = NamedAssetSatisfiedFile(logDir, parsed.AssetName)
+		} else {
+			marker = ArtifactSatisfiedFile(logDir, parsed.Path, parsed.Version)
 		}
-		marker := NamedAssetSatisfiedFile(logDir, parsed.AssetName)
 		if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
 			return fmt.Errorf("create artifact need marker directory: %w", err)
 		}
