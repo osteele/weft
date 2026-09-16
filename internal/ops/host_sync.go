@@ -1753,6 +1753,15 @@ func resolvePublishedProducerNeed(database *sql.DB, need pendingNeed, getR2Clien
 	if err != nil {
 		return "", fmt.Errorf("read producer job %s attempt %d publication: %w", ids.FormatJobID(producer.ID), runID, err)
 	}
+	// The stored row is written by the completion sweep and is not
+	// guaranteed to refresh after the producer turns terminal. When it does
+	// not settle the wanted artifact, consult the authoritative
+	// exact-attempt report before refusing dispatch.
+	if !publicationTerminallyDecidesNeed(publication, producer.ID, runID, need.path) {
+		if refreshed := refreshAttemptPublicationState(database, getR2Client, producer.ID, runID); refreshed != nil {
+			publication = refreshed
+		}
+	}
 	if publication == nil || publication.AttemptID != runID || publication.JobID != producer.ID {
 		return "", fmt.Errorf(
 			"producer job %s attempt %d publication unavailable: no attempt-scoped evidence",
@@ -1811,6 +1820,67 @@ func resolvePublishedProducerNeed(database *sql.DB, need pendingNeed, getR2Clien
 	}
 }
 
+// producerR2ProbeTimeout bounds the R2 evidence probes made while resolving
+// a producer need: the exact-attempt publication report fetch and the
+// ready-artifact object-existence probe. It mirrors the r2resolve
+// object-existence policy (objectExistsTimeout).
+const producerR2ProbeTimeout = 20 * time.Second
+
+// getAttemptPublicationReport reads the exact-attempt publication report
+// from R2. Tests stub it; the default hits the live object store.
+var getAttemptPublicationReport = func(ctx context.Context, client *r2.Client, key string) ([]byte, error) {
+	return client.GetObject(ctx, key)
+}
+
+// publicationTerminallyDecidesNeed reports whether the stored publication
+// row settles the wanted artifact as ready or failed. Pending, unknown,
+// fenced-out, and absent rows do not: they may predate the producer's
+// terminal transition, so the authoritative attempt report gets a chance
+// to settle them first.
+func publicationTerminallyDecidesNeed(publication *db.AttemptPublicationState, jobID, runID int64, artifactPath string) bool {
+	if publication == nil || publication.AttemptID != runID || publication.JobID != jobID {
+		return false
+	}
+	if publication.ExecutionState != db.PublicationExecutionComplete {
+		return false
+	}
+	wanted := cleanPublishedArtifactPath(artifactPath)
+	for _, artifact := range publication.Artifacts {
+		if cleanPublishedArtifactPath(artifact.Path) != wanted {
+			continue
+		}
+		return artifact.State == db.PublicationStateReady || artifact.State == db.PublicationStateFailed
+	}
+	return publication.RequiredArtifactsState == db.PublicationStateReady ||
+		publication.RequiredArtifactsState == db.PublicationStateFailed
+}
+
+// refreshAttemptPublicationState fetches the authoritative attempt
+// publication report for the exact producer attempt, ingests it through
+// the DB helpers (mirroring cloudneeds.latestPublicationState), and
+// returns the resulting stored row. It returns nil when no usable report
+// is available; the caller then decides from the row it already had.
+func refreshAttemptPublicationState(database *sql.DB, getR2Client func() (*r2.Client, error), jobID, runID int64) *db.AttemptPublicationState {
+	client, err := getR2Client()
+	if err != nil || client == nil || !client.IsConfigured() {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), producerR2ProbeTimeout)
+	defer cancel()
+	data, err := getAttemptPublicationReport(ctx, client, r2keys.JobAttemptPublicationReport(jobID, runID))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	if _, err := db.IngestAttemptPublicationReport(database, data, jobID, runID); err != nil {
+		return nil
+	}
+	refreshed, err := db.GetAttemptPublicationState(database, runID)
+	if err != nil {
+		return nil
+	}
+	return refreshed
+}
+
 func resolveReadyProducerNeedKey(getR2Client func() (*r2.Client, error), jobID, runID int64, artifactPath string) (string, error) {
 	client, err := getR2Client()
 	if err != nil {
@@ -1819,7 +1889,9 @@ func resolveReadyProducerNeedKey(getR2Client func() (*r2.Client, error), jobID, 
 	if client == nil || !client.IsConfigured() {
 		return "", errors.New("R2 is not configured")
 	}
-	key, err := resolveNeedKeyForAttempt(context.Background(), client, jobID, runID, artifactPath)
+	probeCtx, cancel := context.WithTimeout(context.Background(), producerR2ProbeTimeout)
+	defer cancel()
+	key, err := resolveNeedKeyForAttempt(probeCtx, client, jobID, runID, artifactPath)
 	if errors.Is(err, r2resolve.ErrArtifactMissing) {
 		return "", fmt.Errorf(
 			"producer job %s attempt %d reported artifact %q ready, but its exact-attempt object is unavailable: %w",

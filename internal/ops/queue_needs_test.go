@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/inventoryqueue"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/r2resolve"
 )
 
@@ -25,9 +26,11 @@ func setupR2QueueNeeds(t *testing.T) (*sql.DB, *fakeInventoryQueueStore, func([]
 	database := db.SetupTestDB(t)
 	oldLoad, oldStore, oldSSH := loadQueueConfig, newInventoryQueueStore, appendQueueCommandSSH
 	oldExists, oldRuns := r2resolve.ObjectExistsFunc, r2resolve.ListRunIDsFunc
+	oldReportFetch := getAttemptPublicationReport
 	t.Cleanup(func() {
 		loadQueueConfig, newInventoryQueueStore, appendQueueCommandSSH = oldLoad, oldStore, oldSSH
 		r2resolve.ObjectExistsFunc, r2resolve.ListRunIDsFunc = oldExists, oldRuns
+		getAttemptPublicationReport = oldReportFetch
 	})
 	loadQueueConfig = func() (*config.Config, error) {
 		return &config.Config{Hosts: map[string]config.HostConfig{
@@ -49,6 +52,11 @@ func setupR2QueueNeeds(t *testing.T) (*sql.DB, *fakeInventoryQueueStore, func([]
 		return false, nil
 	}
 	r2resolve.ListRunIDsFunc = func(context.Context, r2resolve.Lister, int64) ([]int64, error) {
+		return nil, nil
+	}
+	// No publication report on R2 unless a test publishes one: the resolver
+	// then falls back to the stored row, matching pre-refresh behavior.
+	getAttemptPublicationReport = func(context.Context, *r2.Client, string) ([]byte, error) {
 		return nil, nil
 	}
 	// artifactNeedVersion defaults to a current agent. A caller passing an
@@ -258,6 +266,145 @@ func TestR2QueueProducerNeedRejectsMismatchedAttemptKey(t *testing.T) {
 	}
 	if adds := r2QueueAdds(t, store); len(adds) != 0 {
 		t.Fatalf("mismatched attempt published queue entries: %+v", adds)
+	}
+}
+
+func attemptPublicationReportPayload(payloadKey string) []byte {
+	return []byte(fmt.Sprintf(`{"sequence":2,"observed_at_unix":1700000000,`+
+		`"facets":{"execution_state":"complete","required_artifacts_state":"ready","drain_state":"ready"},`+
+		`"artifacts":[{"name":"result","path":"outputs/result.bin","state":"ready",`+
+		`"ready_at_unix":1700000000,"payload_key":%q}]}`, payloadKey))
+}
+
+func stubAttemptPublicationReport(t *testing.T, jobID, runID int64, report []byte) {
+	t.Helper()
+	reportKey := r2keys.JobAttemptPublicationReport(jobID, runID)
+	getAttemptPublicationReport = func(_ context.Context, _ *r2.Client, gotKey string) ([]byte, error) {
+		if gotKey != reportKey {
+			t.Errorf("publication report key = %q, want exact-attempt %q", gotKey, reportKey)
+			return nil, nil
+		}
+		return report, nil
+	}
+}
+
+// A completed producer whose stored publication row is absent or stale must
+// still unblock dispatch when the authoritative exact-attempt report on R2
+// is published: the resolver fetches and ingests that report instead of
+// refusing on the stale row.
+func TestR2QueueProducerNeedRefreshesPublicationFromAttemptReport(t *testing.T) {
+	for _, stored := range []string{"absent", "pending"} {
+		t.Run(stored, func(t *testing.T) {
+			database, store, _ := setupR2QueueNeeds(t)
+			spec, key, runID := recordNeedProducerWithoutPublication(t, database, "")
+			var producerID int64
+			if _, err := fmt.Sscanf(spec, "outputs/result.bin:%d", &producerID); err != nil {
+				t.Fatal(err)
+			}
+			if stored == "pending" {
+				now := time.Now().Unix()
+				if _, err := db.UpsertAttemptPublicationState(database, &db.AttemptPublicationState{
+					AttemptID: runID, JobID: producerID, Sequence: 1, ObservedAt: now,
+					ExecutionState:         db.PublicationExecutionPending,
+					RequiredArtifactsState: db.PublicationStatePending,
+					DrainState:             db.PublicationStatePending,
+					Artifacts: []db.AttemptPublicationArtifact{{
+						Name: "result", Path: "outputs/result.bin", State: db.PublicationStatePending,
+					}},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stubAttemptPublicationReport(t, producerID, runID, attemptPublicationReportPayload(key))
+			job := recordR2NeedsConsumer(t, database, []string{spec})
+
+			if err := AppendJobToQueue(database, job, time.Second); err != nil {
+				t.Fatalf("dispatch with published exact-attempt report (%s stored row): %v", stored, err)
+			}
+			adds := r2QueueAdds(t, store)
+			if len(adds) != 1 || len(adds[0].ArtifactNeeds) != 1 || adds[0].ArtifactNeeds[0].R2Key != key {
+				t.Fatalf("published attempt report did not dispatch exact key: %+v", adds)
+			}
+			// The fetched report is ingested, so later passes decide from the
+			// stored row without another R2 round-trip.
+			state, err := db.GetAttemptPublicationState(database, runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == nil || state.ExecutionState != db.PublicationExecutionComplete ||
+				len(state.Artifacts) != 1 || state.Artifacts[0].State != db.PublicationStateReady ||
+				state.Artifacts[0].PayloadKey != key {
+				t.Fatalf("attempt report not ingested: %+v", state)
+			}
+		})
+	}
+}
+
+// The mismatched-key refusal applies to a refreshed report exactly as it
+// does to a stored row: bytes left by a different attempt are not
+// admissible evidence for this one.
+func TestR2QueueProducerNeedRefreshedReportRejectsMismatchedKey(t *testing.T) {
+	database, store, _ := setupR2QueueNeeds(t)
+	spec, _, runID := recordNeedProducerWithoutPublication(t, database, "")
+	var producerID int64
+	if _, err := fmt.Sscanf(spec, "outputs/result.bin:%d", &producerID); err != nil {
+		t.Fatal(err)
+	}
+	staleKey := fmt.Sprintf("jobs/%d/runs/%d/outputs/outputs/result.bin", producerID, runID+1)
+	stubAttemptPublicationReport(t, producerID, runID, attemptPublicationReportPayload(staleKey))
+	job := recordR2NeedsConsumer(t, database, []string{spec})
+
+	err := AppendJobToQueue(database, job, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "mismatched payload key") {
+		t.Fatalf("want attempt-provenance refusal from refreshed report, got %v", err)
+	}
+	if adds := r2QueueAdds(t, store); len(adds) != 0 {
+		t.Fatalf("mismatched attempt published queue entries: %+v", adds)
+	}
+}
+
+// A ready artifact without a payload key is resolved by probing R2 for the
+// exact-attempt object. That probe runs unbounded on context.Background
+// before the wb137 review repair; it must carry the same 20s bound as the
+// r2resolve object-existence helper.
+func TestR2QueueProducerNeedReadyProbeUsesBoundedContext(t *testing.T) {
+	database, store, _ := setupR2QueueNeeds(t)
+	spec, _, runID := recordNeedProducerWithoutPublication(t, database, "")
+	var producerID int64
+	if _, err := fmt.Sscanf(spec, "outputs/result.bin:%d", &producerID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if _, err := db.UpsertAttemptPublicationState(database, &db.AttemptPublicationState{
+		AttemptID: runID, JobID: producerID, Sequence: 1, ObservedAt: now,
+		ExecutionState: db.PublicationExecutionComplete, ExecutionCompletedAt: &now,
+		RequiredArtifactsState: db.PublicationStateReady, RequiredArtifactsReadyAt: &now,
+		DrainState: db.PublicationStateReady, DrainCompletedAt: &now,
+		Artifacts: []db.AttemptPublicationArtifact{{
+			Name: "result", Path: "outputs/result.bin", State: db.PublicationStateReady, ReadyAt: &now,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var probedKey string
+	r2resolve.ObjectExistsFunc = func(ctx context.Context, _ r2resolve.Store, key string) (bool, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Error("object-existence probe ran without a deadline")
+		} else if remaining := time.Until(deadline); remaining <= 0 || remaining > producerR2ProbeTimeout {
+			t.Errorf("object-existence probe deadline in %v, want within %v", remaining, producerR2ProbeTimeout)
+		}
+		probedKey = key
+		return true, nil
+	}
+	job := recordR2NeedsConsumer(t, database, []string{spec})
+
+	if err := AppendJobToQueue(database, job, time.Second); err != nil {
+		t.Fatalf("dispatch with ready publication needing R2 probe: %v", err)
+	}
+	adds := r2QueueAdds(t, store)
+	if len(adds) != 1 || len(adds[0].ArtifactNeeds) != 1 || adds[0].ArtifactNeeds[0].R2Key != probedKey {
+		t.Fatalf("ready probe did not dispatch the probed exact-attempt key: %+v (probed %q)", adds, probedKey)
 	}
 }
 

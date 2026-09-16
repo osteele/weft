@@ -1560,7 +1560,16 @@ rule R2PullInventoryProducerNeedStaging {
         --   internal/ops/host_sync.go resolveR2QueueNeeds and
         --     resolvePublishedProducerNeed — require the completed
         --     authoritative attempt, consume attempt_publication_state, and
-        --     reject mismatched or historical R2 keys before queue publication
+        --     reject mismatched or historical R2 keys before queue
+        --     publication. A stored row that is absent or not terminal for
+        --     the wanted artifact is first refreshed from the authoritative
+        --     exact-attempt report (r2keys.JobAttemptPublicationReport),
+        --     ingested via db.IngestAttemptPublicationReport, and only then
+        --     decides ready/pending/failed/unavailable; the attempt-scoped
+        --     fence and mismatched-key refusal apply to the refreshed row
+        --     unchanged. All R2 evidence probes (report fetch and
+        --     object-existence checks) run under a 20s bounded context
+        --     matching the r2resolve object-existence policy.
         --   internal/ops/queue.go — carries the resolved ArtifactNeed in the
         --     R2 inbox add command and gates producer support by runner version
         --   internal/runner/runner.go — stages the exact R2 key after source
