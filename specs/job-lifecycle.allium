@@ -1394,6 +1394,40 @@ rule PreflightRejectionClosesAttempt {
 -- flush after the script exits, then again as background post-job work
 -- before the agent self-destructs.
 
+rule DeclaredOutputPublicationSurvivesWaiterLoss {
+    when: EvaluateDeclaredOutputPublicationSurvivesWaiterLoss(job, attempt)
+    -- legacy: requires: attempt exits 0 on an inventory host
+    -- legacy: requires: job declares a filesystem output
+    -- legacy: ensures: declared artifacts and the exact attempt-attributed
+             -- legacy: output_files are recorded before publication handoff
+    -- legacy: ensures: a submitter-side waiter is not part of the producer boundary
+    -- legacy: ensures: a declared file outside convention output directories
+             -- legacy: (including `.agent-execution/results/<model-call-id>.json`)
+             -- legacy: uses the supported per-attempt outputs prefix when discovery
+             -- legacy: attributed it to this attempt
+    -- legacy: ensures: artifact list, get, and cat can retrieve the result
+    -- legacy: ensures: recovery retries publication rather than command execution
+    -- legacy: ensures: an execution `.complete` marker alone does not fence recovery
+    -- legacy: ensures: only a ready attempt-scoped drain report fences recovery
+    -- legacy: ensures: the command executes exactly once for the attempt
+
+    -- legacy annotation: @guidance
+        -- The normal waiter and the status/completion recovery paths construct
+        -- the same PostJobCapture with run ID, start/end bounds, and the
+        -- completion record's output_files. The inventory publication
+        -- descriptor persists that evidence before asynchronous work begins.
+        -- A restart replays the descriptor or retained completion. Only an
+        -- attempt-scoped publication report whose drain_state is ready fences
+        -- replay; the execution completion marker does not.
+        --
+        -- The agent maps a manifest declaration to the per-run outputs key
+        -- when the attempt's output_files captured that workspace-relative
+        -- path. Both declared-artifact uploads and convention-directory walks
+        -- reject files newer than end_time + 2 minutes. Thus late recovery can
+        -- publish the completed worker result, but cannot publish a successor
+        -- attempt's overwrite under the old run ID.
+}
+
 rule ProducesPreRegisteredAtJobStart {
     when: job: Job transitions_to running
     -- legacy: requires: job.produces is not empty
@@ -1671,12 +1705,13 @@ invariant Attribution {
         --       same-workdir jobs) — is covered by (d).
         --   (d) Attempt-window cutoff on the agent's upload walk:
         --       uploadOutputDirs applies runner.AttemptOutputThreshold
-        --       (the attempt's start − 1s, shared with cutoff (a)) as an
-        --       absolute rclone --max-age bound
-        --       (cmd/agent/runinstance.go). The window is disabled for restaged-output
-        --       attempts (cloud.AgentJob.RestagedOutputs), whose files
-        --       legitimately carry prior-attempt mtimes and must reach
-        --       the new attempt's prefix.
+        --       (the attempt's start − 1s) and, for post-job publication,
+        --       the attempt end + 2m as absolute rclone bounds. Declared
+        --       artifact publication applies the same end bound before
+        --       reading a file or directory. The start bound is disabled for
+        --       restaged-output attempts (cloud.AgentJob.RestagedOutputs),
+        --       whose files legitimately carry prior-attempt mtimes and must
+        --       reach the new attempt's prefix; the end fence remains.
         --   (c) Remote corroboration for artifact sync: files found in the
         --       SUBMITTER'S local working tree are never attributable to a
         --       job — the local tree holds the user's own files and other

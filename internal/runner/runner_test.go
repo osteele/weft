@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -844,17 +845,14 @@ func TestRetainedPublicationRecoveryDiscoversCustomOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var recovered []OutputFile
+	var recovered PostJobCapture
 	restored.RecoverJobPublication = func(_ context.Context, capture PostJobCapture) {
-		var err error
-		recovered, err = DiscoverJobOutputsSince(capture.WorkDir, capture.OutputDirs, nil, time.Unix(capture.StartTime, 0))
-		if err != nil {
-			t.Fatal(err)
-		}
+		recovered = capture
 	}
 	restored.recoverRetainedPublications(context.Background())
-	if !slices.ContainsFunc(recovered, func(f OutputFile) bool { return f.RelPath == "metrics/result.txt" }) {
-		t.Fatalf("custom output lost during startup recovery: %+v", recovered)
+	if recovered.RunID != job.RunID || recovered.EndTime == 0 ||
+		!slices.ContainsFunc(recovered.OutputFiles, func(f OutputFile) bool { return f.RelPath == "metrics/result.txt" }) {
+		t.Fatalf("late publication recovery lost attempt output evidence: %+v", recovered)
 	}
 }
 
@@ -1360,6 +1358,67 @@ func TestRefreshRunningJobs_RecoveredCompletionDiscoversOutputs(t *testing.T) {
 	}
 	if rec.OutputFiles[0].RelPath != "output/result.json" {
 		t.Fatalf("output file = %q, want output/result.json", rec.OutputFiles[0].RelPath)
+	}
+}
+
+func TestRefreshRunningJobs_PublishesDeclaredWorkerResultAfterWaiterLoss(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	r, _ := initTestRunner(t)
+	manager := &recordingPostJobManager{}
+	r.PostJobManager = manager
+
+	const jobID, runID = int64(384), int64(9001)
+	jobIDText := strconv.FormatInt(jobID, 10)
+	workDir := t.TempDir()
+	resultRel := ".agent-execution/results/model-call-7.json"
+	resultPath := filepath.Join(workDir, filepath.FromSlash(resultRel))
+	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, []byte(`{"status":"completed"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job := &opsqueue.CommandJob{
+		ID: jobID, RunID: runID, Dir: workDir,
+		Cmd:      "printf reran > should-not-exist",
+		Outputs:  []string{resultRel},
+		Produces: []string{resultRel},
+	}
+	if err := writeJobFile(r.queueDir, job); err != nil {
+		t.Fatal(err)
+	}
+	paths := NewJobPaths(r.logDir, jobID)
+	if err := os.MkdirAll(filepath.Dir(paths.Status), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Status, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := r.nowFunc().Add(-time.Minute).Unix()
+	r.state.AddRunning(jobIDText, RunningJobState{
+		RunID: runID, StartedAt: startedAt, DiskPath: workDir,
+	})
+
+	r.refreshRunningJobs()
+	r.refreshRunningJobs()
+
+	if len(manager.captures) != 1 {
+		t.Fatalf("post-job captures = %+v, want one attempt-fenced publication", manager.captures)
+	}
+	capture := manager.captures[0]
+	if capture.RunID != runID || capture.EndTime <= startedAt ||
+		len(capture.OutputFiles) != 1 || capture.OutputFiles[0].RelPath != resultRel {
+		t.Fatalf("capture = %+v, want completed worker result for run %d", capture, runID)
+	}
+	manifest, err := artifacts.ReadManifestFile(ExpandTilde(artifacts.RemoteManifestPath(jobID)), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Artifacts) != 1 || manifest.Artifacts[0].Path != resultRel {
+		t.Fatalf("manifest = %+v, want declared worker result", manifest)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "should-not-exist")); !os.IsNotExist(err) {
+		t.Fatalf("recovery executed the command again: %v", err)
 	}
 }
 

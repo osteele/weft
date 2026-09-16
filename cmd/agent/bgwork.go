@@ -16,7 +16,6 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/r2keys"
-	"github.com/osteele/weft/internal/r2resolve"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -133,7 +132,9 @@ type publicationDescriptor struct {
 	Phase                 string                    `json:"phase,omitempty"`
 	UploadStartedUnix     int64                     `json:"upload_started_unix,omitempty"`
 	OutputWindowStartUnix int64                     `json:"output_window_start_unix,omitempty"`
+	OutputWindowEndUnix   int64                     `json:"output_window_end_unix,omitempty"`
 	OutputDirs            []string                  `json:"output_dirs,omitempty"`
+	OutputFiles           []runner.OutputFile       `json:"output_files,omitempty"`
 	CleanupDir            string                    `json:"cleanup_dir,omitempty"`
 	EnqueuedAtUnix        int64                     `json:"enqueued_at_unix"`
 	ResultsUpload         runner.UploadSummary      `json:"results_upload,omitempty"`
@@ -198,7 +199,9 @@ func descriptorForWork(work *queuedPostJobWork) publicationDescriptor {
 		Phase:                 pw.phase,
 		UploadStartedUnix:     pw.uploadStartedUnix,
 		OutputWindowStartUnix: pw.outputWindowStartUnix,
+		OutputWindowEndUnix:   pw.outputWindowEndUnix,
 		OutputDirs:            append([]string(nil), pw.outputDirs...),
+		OutputFiles:           append([]runner.OutputFile(nil), pw.outputFiles...),
 		CleanupDir:            pw.cleanupDir,
 		EnqueuedAtUnix:        work.enqueuedAt.Unix(),
 		ResultsUpload:         work.resultsUpload,
@@ -225,9 +228,12 @@ func workFromDescriptor(d publicationDescriptor) *queuedPostJobWork {
 		phase:                 d.Phase,
 		uploadStartedUnix:     d.UploadStartedUnix,
 		outputWindowStartUnix: d.OutputWindowStartUnix,
+		outputWindowEndUnix:   d.OutputWindowEndUnix,
 		outputDirs:            append([]string(nil), d.OutputDirs...),
+		outputFiles:           append([]runner.OutputFile(nil), d.OutputFiles...),
 		cleanupDir:            d.CleanupDir,
 	}
+	hydratePostJobAttempt(&pw)
 	estimated, retained, workdirBytes, snapshotBytes := estimatePostJobBytes(pw)
 	work := &queuedPostJobWork{
 		pw:             pw,
@@ -252,6 +258,27 @@ func workFromDescriptor(d publicationDescriptor) *queuedPostJobWork {
 		consumeEstimatedBytes(work, d.OutputResult.Bytes)
 	}
 	return work
+}
+func hydratePostJobAttempt(pw *postJobWork) {
+	if pw == nil || pw.logSnapshot == "" || pw.jobID <= 0 {
+		return
+	}
+	rec, err := runner.ReadCompletionRecord(runner.NewJobPaths(pw.logSnapshot, pw.jobID))
+	if err != nil || (pw.runID > 0 && rec.RunID > 0 && pw.runID != rec.RunID) {
+		return
+	}
+	if pw.outputWindowEndUnix <= 0 {
+		pw.outputWindowEndUnix = rec.EndTime
+	}
+	if len(pw.outputFiles) == 0 && len(rec.OutputFiles) > 0 {
+		pw.outputFiles = append([]runner.OutputFile(nil), rec.OutputFiles...)
+	}
+	if len(pw.outputDirs) == 0 && len(rec.OutputDirs) > 0 {
+		pw.outputDirs = append([]string(nil), rec.OutputDirs...)
+	}
+	if pw.workDir == "" {
+		pw.workDir = rec.RuntimeWorkingDir
+	}
 }
 
 func (m *bgWorkManager) persistPublicationDescriptorLocked(work *queuedPostJobWork) error {
@@ -336,13 +363,14 @@ type postJobWork struct {
 	diskPath          string
 	phase             string
 	uploadStartedUnix int64
-	// outputWindowStartUnix windows the convention-output upload to this
-	// attempt (see uploadOutputDirs); 0 disables the window. Callers apply
-	// policy before setting it (e.g. restaged-output attempts pass 0).
+	// The output window and exact discovered file set fence publication to the
+	// completed attempt. A zero bound disables that side of the window.
 	outputWindowStartUnix int64
+	outputWindowEndUnix   int64
 	// outputDirs carries the job's configured convention output dirs;
 	// empty falls back to the defaults (see config.EffectiveOutputDirs).
-	outputDirs []string
+	outputDirs  []string
+	outputFiles []runner.OutputFile
 	// cleanupDir is owned by the publication chain and removed only after its
 	// payload sources are no longer needed. Inventory R2-isolated jobs use this
 	// to keep their per-job source tree alive until output upload completes.
@@ -440,7 +468,8 @@ func (m *bgWorkManager) RegisterNewJobs(jobs []cloud.AgentJob) {
 // A worker executes one stage at a time and requeues the chain at its next
 // priority. This lets a later job's diagnostic record run before an earlier
 // job's bulk convention output without creating one goroutine per job.
-func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
+func (m *bgWorkManager) StartPostJobWork(pw postJobWork) bool {
+	hydratePostJobAttempt(&pw)
 	estimated, retained, workdirBytes, snapshotBytes := estimatePostJobBytes(pw)
 	work := &queuedPostJobWork{
 		pw:             pw,
@@ -459,11 +488,11 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 	if m.closed {
 		m.mu.Unlock()
 		m.recordError(pw.jobID, "enqueue", errors.New("publication manager is closed"))
-		return
+		return false
 	}
 	if _, exists := m.known[work.key()]; exists {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	m.registerUploadLocked(pw.workDir)
 	m.known[work.key()] = work
@@ -475,6 +504,7 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 	m.updatePublicationStateLocked(time.Time{})
 	m.cond.Signal()
 	m.mu.Unlock()
+	return true
 }
 
 func (m *bgWorkManager) admissionBlockedLocked(incoming *queuedPostJobWork) bool {
@@ -569,7 +599,10 @@ func (m *bgWorkManager) runPublicationStage(work *queuedPostJobWork) bool {
 		}
 		m.publishPublicationReport(work, runner.PublicationPending, runner.PublicationPending, time.Time{})
 	case publicationRequiredArtifacts:
-		work.artifactResult = uploadArtifactManifestEntries(pw.r2Bucket, pw.jobID, pw.runID, pw.workDir, pw.outputDirs)
+		work.artifactResult = uploadArtifactManifestEntriesForAttempt(
+			pw.r2Bucket, pw.jobID, pw.runID, pw.workDir, pw.outputDirs,
+			pw.outputFiles, pw.outputWindowEndUnix,
+		)
 		consumeEstimatedBytes(work, work.artifactResult.Bytes)
 		if work.artifactResult.Status != runner.UploadStatusOK {
 			m.recordError(pw.jobID, "upload-artifacts", fmt.Errorf("status=%s", work.artifactResult.Status))
@@ -580,7 +613,10 @@ func (m *bgWorkManager) runPublicationStage(work *queuedPostJobWork) bool {
 		}
 		m.publishPublicationReport(work, requiredState, runner.PublicationPending, time.Now())
 	case publicationConventionOutputs:
-		work.outputResult = uploadOutputDirs(pw.r2Bucket, pw.jobID, pw.runID, pw.workDir, pw.outputWindowStartUnix, pw.outputDirs)
+		work.outputResult = uploadOutputDirs(
+			pw.r2Bucket, pw.jobID, pw.runID, pw.workDir,
+			pw.outputWindowStartUnix, pw.outputWindowEndUnix, pw.outputDirs,
+		)
 		consumeEstimatedBytes(work, work.outputResult.Bytes)
 		if work.outputResult.Status != runner.UploadStatusOK {
 			m.recordError(pw.jobID, "upload-outputs", fmt.Errorf("status=%s", work.outputResult.Status))
@@ -830,7 +866,7 @@ func artifactPublicationReport(pw postJobWork, upload runner.OutputUploadResult,
 }
 
 func artifactPayloadKey(pw postJobWork, manifest artifacts.Manifest, artifactPath string) string {
-	if rel, ok := r2resolve.ConventionOutputRelPath(manifest, artifactPath, pw.outputDirs); ok {
+	if rel, ok := attemptOutputRelPath(manifest, pw.workDir, artifactPath, pw.outputDirs, pw.outputFiles); ok {
 		return r2keys.JobAttemptOutputsPrefix(pw.jobID, pw.runID) + rel
 	}
 	return r2keys.JobAttemptArtifactFilesPrefix(pw.jobID, pw.runID) + filepath.ToSlash(artifacts.LocalRelativePath(artifactPath))

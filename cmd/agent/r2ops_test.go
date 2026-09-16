@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/runner"
 )
 
 func writeFakeRclone(t *testing.T, dir string) string {
@@ -90,5 +93,76 @@ func TestR2RecoveryRequestsRespectCancellation(t *testing.T) {
 	}
 	if err := r2PutReaderContext(ctx, "test-bucket", "value", strings.NewReader("0")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expired recovery still published to R2: %v", err)
+	}
+}
+
+type recordingPublicationManager struct {
+	captures []runner.PostJobCapture
+}
+
+func (m *recordingPublicationManager) WaitForWorkdir(string) {}
+func (m *recordingPublicationManager) WaitForAll()           {}
+func (m *recordingPublicationManager) StartPostJob(capture runner.PostJobCapture) {
+	m.captures = append(m.captures, capture)
+}
+
+func TestRecoverInventoryPublicationRetriesMissingDrainAfterWaiterExit(t *testing.T) {
+	previousGet, previousPut := inventoryPublicationGet, inventoryPublicationPut
+	t.Cleanup(func() {
+		inventoryPublicationGet, inventoryPublicationPut = previousGet, previousPut
+	})
+	var gotGetKey, gotPutKey, gotPutContent string
+	inventoryPublicationGet = func(_ context.Context, _, key string) (string, error) {
+		gotGetKey = key
+		return "", nil
+	}
+	inventoryPublicationPut = func(_ context.Context, _, key, content string) error {
+		gotPutKey, gotPutContent = key, content
+		return nil
+	}
+	manager := &recordingPublicationManager{}
+	capture := runner.PostJobCapture{
+		JobID: 81, RunID: 17, WorkDir: t.TempDir(), ExitCode: 0,
+		StartTime: 100, EndTime: 200,
+		OutputFiles: []runner.OutputFile{{
+			RelPath: ".agent-execution/results/model-call-9.json", SizeBytes: 42,
+		}},
+	}
+
+	recoverInventoryPublication(context.Background(), "bucket", manager, capture)
+
+	if gotGetKey != r2keys.JobAttemptPublicationReport(81, 17) {
+		t.Fatalf("recovery read %q, want attempt publication report", gotGetKey)
+	}
+	if len(manager.captures) != 1 || manager.captures[0].RunID != 17 ||
+		len(manager.captures[0].OutputFiles) != 1 {
+		t.Fatalf("publication captures = %+v, want exact completed attempt", manager.captures)
+	}
+	if gotPutKey != r2keys.JobAttemptComplete(81, 17) || gotPutContent != "0" {
+		t.Fatalf("completion repair = (%q, %q), want attempt marker with exit 0", gotPutKey, gotPutContent)
+	}
+}
+
+func TestRecoverInventoryPublicationReadyDrainIsTerminal(t *testing.T) {
+	previousGet, previousPut := inventoryPublicationGet, inventoryPublicationPut
+	t.Cleanup(func() {
+		inventoryPublicationGet, inventoryPublicationPut = previousGet, previousPut
+	})
+	inventoryPublicationGet = func(_ context.Context, _, _ string) (string, error) {
+		return `{"sequence":3,"facets":{"drain_state":"ready"}}`, nil
+	}
+	putCalls := 0
+	inventoryPublicationPut = func(context.Context, string, string, string) error {
+		putCalls++
+		return nil
+	}
+	manager := &recordingPublicationManager{}
+
+	recoverInventoryPublication(context.Background(), "bucket", manager, runner.PostJobCapture{
+		JobID: 82, RunID: 18, WorkDir: t.TempDir(), ExitCode: 0,
+	})
+
+	if len(manager.captures) != 0 || putCalls != 0 {
+		t.Fatalf("ready drain retried publication: captures=%+v puts=%d", manager.captures, putCalls)
 	}
 }

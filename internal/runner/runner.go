@@ -105,14 +105,18 @@ type Runner struct {
 }
 
 type PostJobCapture struct {
-	JobID    int64
-	RunID    int64
-	WorkDir  string
-	LogDir   string
-	ExitCode int
-	// StartTime is the attempt's start (unix seconds); post-job output
-	// uploads window their walk to files modified at or after it.
-	StartTime int64
+	JobID       int64
+	RunID       int64
+	WorkDir     string
+	LogDir      string
+	ExitCode    int
+	StartTime   int64
+	EndTime     int64
+	OutputFiles []OutputFile
+	// StartTime and EndTime fence post-job output publication to the attempt.
+	// OutputFiles is the runner-attributed set captured at process exit.
+	// Together they let late recovery publish the original attempt without
+	// rediscovering a successor's bytes from a reused working directory.
 	// OutputDirs carries the job's configured convention output dirs so
 	// post-job uploads walk the same dirs discovery attributes.
 	OutputDirs []string
@@ -276,6 +280,7 @@ func (r *Runner) recoverRetainedPublications(ctx context.Context) {
 			r.RecoverJobPublication(ctx, PostJobCapture{
 				JobID: jobID, RunID: rec.RunID, WorkDir: rec.RuntimeWorkingDir,
 				LogDir: r.logDir, ExitCode: rec.ExitCode, StartTime: rec.StartTime,
+				EndTime: rec.EndTime, OutputFiles: append([]OutputFile(nil), rec.OutputFiles...),
 				OutputDirs: rec.OutputDirs,
 			})
 		}
@@ -1421,14 +1426,16 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	}
 	if r.PostJobManager != nil {
 		r.PostJobManager.StartPostJob(PostJobCapture{
-			JobID:      jobID,
-			RunID:      rj.Data.RunID,
-			WorkDir:    runDir,
-			LogDir:     filepath.Dir(paths.Log),
-			ExitCode:   ei.ExitCode,
-			StartTime:  startTime,
-			OutputDirs: rj.Data.OutputDirs,
-			CleanupDir: cleanupDir,
+			JobID:       jobID,
+			RunID:       rj.Data.RunID,
+			WorkDir:     runDir,
+			LogDir:      filepath.Dir(paths.Log),
+			ExitCode:    ei.ExitCode,
+			StartTime:   startTime,
+			EndTime:     endTime,
+			OutputFiles: append([]OutputFile(nil), outputFiles...),
+			OutputDirs:  rj.Data.OutputDirs,
+			CleanupDir:  cleanupDir,
 		})
 	}
 	if r.OnJobFinish != nil {
@@ -1527,6 +1534,10 @@ func (r *Runner) refreshRunningJobs() {
 				oplog.LogJob("job.slot_released", jobID, "", oplog.WithDetailf("run_id=%d exit=%d recovered=true", rec.RunID, rec.ExitCode))
 				CleanupPIDFiles(paths)
 				changed = true
+				if rec.ExitCode == 0 {
+					r.recordRecoveredDeclaredArtifacts(jobID, paths)
+				}
+				r.startRecoveredPostJob(jobID, rs, rec)
 				if r.OnJobFinish != nil {
 					r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), rec.ExitCode)
 				}
@@ -1557,14 +1568,23 @@ func (r *Runner) refreshRunningJobs() {
 					oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("exit=%d (recovered)", exitCode))
 					slog.Warn("job failed (recovered)", "component", "runner", "job_id", jobID, "exit_code", exitCode)
 				}
+				if exitCode == 0 {
+					r.recordRecoveredDeclaredArtifacts(jobID, paths)
+				}
 				outputFiles := r.discoverRecoveredOutputs(jobID, exitCode, rs, paths)
 				WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, outputFiles)
 				WriteRusageFile(paths, rs)
-				r.state.FinishRunningAttempt(jobIDStr, rs, exitCode, endTime)
-				CleanupPIDFiles(paths)
-				changed = true
-				if r.OnJobFinish != nil {
-					r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), exitCode)
+				if r.state.FinishRunningAttempt(jobIDStr, rs, exitCode, endTime) {
+					CleanupPIDFiles(paths)
+					changed = true
+					r.startRecoveredPostJob(jobID, rs, CompletionRecord{
+						RuntimeWorkingDir: rs.DiskPath, RunID: rs.RunID, ExitCode: exitCode,
+						StartTime: rs.StartedAt, EndTime: endTime, OutputFiles: outputFiles,
+						OutputDirs: config.EffectiveOutputDirs(rs.OutputDirs),
+					})
+					if r.OnJobFinish != nil {
+						r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), exitCode)
+					}
 				}
 			}
 			continue
@@ -1679,14 +1699,23 @@ func (r *Runner) refreshRunningJobs() {
 				WriteFailureReasonFile(paths, failureReason)
 				oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("exit=%d (recovered after orphan check)", exitCode))
 			}
+			if exitCode == 0 {
+				r.recordRecoveredDeclaredArtifacts(jobID, paths)
+			}
 			outputFiles := r.discoverRecoveredOutputs(jobID, exitCode, rs, paths)
 			WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, outputFiles)
 			WriteRusageFile(paths, rs)
-			r.state.FinishRunningAttempt(jobIDStr, rs, exitCode, endTime)
-			CleanupPIDFiles(paths)
-			changed = true
-			if r.OnJobFinish != nil {
-				r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), exitCode)
+			if r.state.FinishRunningAttempt(jobIDStr, rs, exitCode, endTime) {
+				CleanupPIDFiles(paths)
+				changed = true
+				r.startRecoveredPostJob(jobID, rs, CompletionRecord{
+					RuntimeWorkingDir: rs.DiskPath, RunID: rs.RunID, ExitCode: exitCode,
+					StartTime: rs.StartedAt, EndTime: endTime, OutputFiles: outputFiles,
+					OutputDirs: config.EffectiveOutputDirs(rs.OutputDirs),
+				})
+				if r.OnJobFinish != nil {
+					r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), exitCode)
+				}
 			}
 			continue
 		}
@@ -1716,6 +1745,40 @@ func completionMatchesRunningAttempt(rec CompletionRecord, running RunningJobSta
 		return running.RunID != 0 && running.RunID == rec.RunID
 	}
 	return running.StartedAt != 0 && running.StartedAt == rec.StartTime
+}
+
+func (r *Runner) recordRecoveredDeclaredArtifacts(jobID int64, paths JobPaths) {
+	rj, err := ReadJobFile(r.queueDir, jobID)
+	if err != nil {
+		return
+	}
+	if err := RecordDeclaredArtifacts(jobID, rj.Produces, rj.Outputs); err != nil {
+		slog.Warn("record recovered declared artifacts", "component", "runner", "job_id", jobID, "error", err)
+		WriteManifestErrorFile(paths, "recovered post-exit: "+err.Error())
+	}
+}
+
+func (r *Runner) startRecoveredPostJob(jobID int64, rs RunningJobState, rec CompletionRecord) {
+	r.processesMu.Lock()
+	stopFn := r.hookStopFuncs[strconv.FormatInt(jobID, 10)]
+	delete(r.hookStopFuncs, strconv.FormatInt(jobID, 10))
+	r.processesMu.Unlock()
+	if stopFn != nil {
+		stopFn()
+	}
+	if r.PostJobManager == nil || rec.RunID <= 0 || rec.EndTime <= 0 {
+		return
+	}
+	workDir := rec.RuntimeWorkingDir
+	if workDir == "" {
+		workDir = rs.DiskPath
+	}
+	r.PostJobManager.StartPostJob(PostJobCapture{
+		JobID: jobID, RunID: rec.RunID, WorkDir: workDir, LogDir: r.logDir,
+		ExitCode: rec.ExitCode, StartTime: rec.StartTime, EndTime: rec.EndTime,
+		OutputFiles: append([]OutputFile(nil), rec.OutputFiles...),
+		OutputDirs:  append([]string(nil), rec.OutputDirs...),
+	})
 }
 
 // discoverRecoveredOutputs discovers convention-based output files for a job

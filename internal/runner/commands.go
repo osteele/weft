@@ -153,10 +153,16 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 					state.Finished[jobIDStr] = FinishedJobState{
 						ExitCode: rec.ExitCode, FinishedAt: rec.EndTime, ObservedAt: time.Now().Unix(),
 					}
+					if rec.ExitCode == 0 {
+						if err := RecordDeclaredArtifacts(cmd.Job.ID, cmd.Job.Produces, cmd.Job.Outputs); err != nil {
+							WriteManifestErrorFile(NewJobPaths(cp.logDir, cmd.Job.ID), "recovered duplicate dispatch: "+err.Error())
+						}
+					}
 					result.RecoveredCompletions = append(result.RecoveredCompletions, PostJobCapture{
 						JobID: cmd.Job.ID, RunID: rec.RunID, WorkDir: rec.RuntimeWorkingDir,
 						LogDir: cp.logDir, ExitCode: rec.ExitCode, StartTime: rec.StartTime,
-						OutputDirs: cmd.Job.OutputDirs,
+						EndTime: rec.EndTime, OutputFiles: append([]OutputFile(nil), rec.OutputFiles...),
+						OutputDirs: append([]string(nil), rec.OutputDirs...),
 					})
 					break
 				}

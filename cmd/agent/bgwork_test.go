@@ -158,7 +158,11 @@ func TestBGWorkManager_RecoversPersistedDescriptor(t *testing.T) {
 		<-blocked
 		return true
 	}
-	m1.StartPostJobWork(postJobWork{jobID: 41, runID: 9, workDir: "/tmp/recover"})
+	outputFiles := []runner.OutputFile{{RelPath: ".agent-execution/results/model-call-10.json", SizeBytes: 88}}
+	m1.StartPostJobWork(postJobWork{
+		jobID: 41, runID: 9, workDir: "/tmp/recover",
+		outputWindowStartUnix: 100, outputWindowEndUnix: 200, outputFiles: outputFiles,
+	})
 	<-started
 
 	// Simulate a fresh agent process by constructing a second manager against
@@ -167,9 +171,14 @@ func TestBGWorkManager_RecoversPersistedDescriptor(t *testing.T) {
 	m2 := newBGWorkManagerWithOptions(nil, true, 1, 4, nil)
 	defer m2.Close()
 	var recovered atomic.Int32
+	var recoveredFence atomic.Bool
 	m2.stageRunner = func(work *queuedPostJobWork) bool {
 		if work.pw.jobID == 41 && work.pw.runID == 9 {
 			recovered.Add(1)
+			if work.pw.outputWindowStartUnix == 100 && work.pw.outputWindowEndUnix == 200 &&
+				len(work.pw.outputFiles) == 1 && work.pw.outputFiles[0].RelPath == outputFiles[0].RelPath {
+				recoveredFence.Store(true)
+			}
 		}
 		return true
 	}
@@ -180,8 +189,8 @@ func TestBGWorkManager_RecoversPersistedDescriptor(t *testing.T) {
 	m2.cond.Broadcast()
 	m2.mu.Unlock()
 	m2.Barrier()
-	if recovered.Load() != 1 {
-		t.Fatalf("recovered executions = %d, want 1", recovered.Load())
+	if recovered.Load() != 1 || !recoveredFence.Load() {
+		t.Fatalf("recovered executions = %d fenced=%v, want one attempt-fenced retry", recovered.Load(), recoveredFence.Load())
 	}
 	close(blocked)
 	m1.Barrier()
@@ -216,6 +225,35 @@ func TestArtifactPublicationReportPreservesPendingFailedAndReady(t *testing.T) {
 	if state != runner.PublicationFailed || completed[0].State != runner.PublicationReady || completed[0].ReadyAt == nil ||
 		completed[1].State != runner.PublicationFailed || completed[1].Detail != "upload stalled" {
 		t.Fatalf("completed report = %+v, state=%q", completed, state)
+	}
+}
+
+func TestArtifactPublicationReportNamesAttemptOutputBacking(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const jobID, runID = int64(52), int64(8)
+	rel := ".agent-execution/results/model-call-11.json"
+	if err := artifacts.WriteManifestFile(runner.ExpandTilde(artifacts.RemoteManifestPath(jobID)), artifacts.Manifest{
+		JobID: jobID, Artifacts: []artifacts.ArtifactSpec{{Path: rel}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pw := postJobWork{
+		jobID: jobID, runID: runID, workDir: t.TempDir(),
+		outputFiles: []runner.OutputFile{{RelPath: rel, SizeBytes: 64}},
+	}
+	upload := runner.OutputUploadResult{
+		Status: runner.UploadStatusOK,
+		Dirs:   []runner.OutputDirUpload{{Dir: rel, Status: runner.UploadStatusOK}},
+	}
+
+	report, state, reason := artifactPublicationReport(pw, upload, runner.PublicationReady, time.Unix(1234, 0))
+
+	if state != runner.PublicationReady || reason != "" || len(report) != 1 {
+		t.Fatalf("publication report = (%+v, %q, %q)", report, state, reason)
+	}
+	want := r2keys.JobAttemptOutputsPrefix(jobID, runID) + rel
+	if report[0].PayloadKey != want || report[0].State != runner.PublicationReady {
+		t.Fatalf("worker result publication = %+v, want ready backing %q", report[0], want)
 	}
 }
 

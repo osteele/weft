@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -55,25 +57,7 @@ func setupInventoryR2(r *runner.Runner, r2Bucket string) {
 	}
 	r.PostJobManager = newInventoryPostJobManager(r2Bucket)
 	r.RecoverJobPublication = func(ctx context.Context, capture runner.PostJobCapture) {
-		marker, err := r2GetContext(ctx, r2Bucket, r2keys.JobAttemptComplete(capture.JobID, capture.RunID))
-		if err != nil {
-			oplog.Log(oplog.OpR2Get, oplog.WithJobID(capture.JobID),
-				oplog.WithDetail("inventory completion recovery"), oplog.WithError(err))
-			return
-		}
-		if marker != "" {
-			return
-		}
-		// Queue the durable snapshot before publishing the terminal marker.
-		// Existing descriptor recovery deduplicates an interrupted handoff.
-		if capture.WorkDir != "" {
-			r.PostJobManager.StartPostJob(capture)
-		}
-		if err := r2PutReaderContext(ctx, r2Bucket, r2keys.JobAttemptComplete(capture.JobID, capture.RunID),
-			strings.NewReader(fmt.Sprintf("%d", capture.ExitCode))); err != nil {
-			oplog.Log(oplog.OpR2Put, oplog.WithJobID(capture.JobID),
-				oplog.WithDetail("inventory completion recovery"), oplog.WithError(err))
-		}
+		recoverInventoryPublication(ctx, r2Bucket, r.PostJobManager, capture)
 	}
 
 	fmt.Printf("R2 uploads enabled (bucket=%s)\n", r2Bucket)
@@ -113,7 +97,7 @@ func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
 			oplog.WithDetail("inventory post-job snapshot"), oplog.WithError(err))
 		return
 	}
-	m.bgm.StartPostJobWork(postJobWork{
+	accepted := m.bgm.StartPostJobWork(postJobWork{
 		r2Bucket:              m.r2Bucket,
 		jobID:                 capture.JobID,
 		runID:                 capture.RunID,
@@ -123,7 +107,43 @@ func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
 		phase:                 fmt.Sprintf("inventory_uploading:%d", capture.JobID),
 		uploadStartedUnix:     time.Now().Unix(),
 		outputWindowStartUnix: capture.StartTime,
+		outputWindowEndUnix:   capture.EndTime,
 		outputDirs:            capture.OutputDirs,
+		outputFiles:           append([]runner.OutputFile(nil), capture.OutputFiles...),
 		cleanupDir:            capture.CleanupDir,
 	})
+	if !accepted {
+		_ = os.RemoveAll(logSnapshot)
+	}
+}
+
+var inventoryPublicationGet = r2GetContext
+var inventoryPublicationPut = func(ctx context.Context, bucket, key, content string) error {
+	return r2PutReaderContext(ctx, bucket, key, strings.NewReader(content))
+}
+
+// recoverInventoryPublication retries only the producer's attempt-scoped
+// publication chain. A terminal execution marker is not publication evidence:
+// only a ready drain report fences recovery. StartPostJob is idempotent by
+// (job ID, run ID), so descriptor recovery and retained-completion recovery may
+// safely race without executing the command again.
+func recoverInventoryPublication(ctx context.Context, bucket string, manager runner.PostJobManager, capture runner.PostJobCapture) {
+	if manager == nil || capture.RunID <= 0 {
+		return
+	}
+	reportData, err := inventoryPublicationGet(ctx, bucket, r2keys.JobAttemptPublicationReport(capture.JobID, capture.RunID))
+	if err == nil && reportData != "" {
+		var report runner.PublicationReport
+		if json.Unmarshal([]byte(reportData), &report) == nil &&
+			report.Sequence > 0 && report.Facets.DrainState == runner.PublicationReady {
+			return
+		}
+	}
+	if capture.WorkDir != "" {
+		manager.StartPostJob(capture)
+	}
+	if err := inventoryPublicationPut(ctx, bucket, r2keys.JobAttemptComplete(capture.JobID, capture.RunID), fmt.Sprintf("%d", capture.ExitCode)); err != nil {
+		oplog.Log(oplog.OpR2Put, oplog.WithJobID(capture.JobID),
+			oplog.WithDetail("inventory completion recovery"), oplog.WithError(err))
+	}
 }

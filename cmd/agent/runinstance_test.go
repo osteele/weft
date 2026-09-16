@@ -177,12 +177,17 @@ func TestReadLogTail_EmptyFile(t *testing.T) {
 }
 
 func TestOutputUploadRcloneArgs(t *testing.T) {
-	if got := outputUploadRcloneArgs(time.Time{}); len(got) != 1 || got[0] != "--update" {
+	if got := outputUploadRcloneArgs(time.Time{}, time.Time{}); len(got) != 1 || got[0] != "--update" {
 		t.Errorf("outputUploadRcloneArgs(zero) = %v, want [--update]", got)
 	}
 	windowStart := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
-	got := outputUploadRcloneArgs(windowStart)
-	want := []string{"--update", "--max-age", "2026-08-02T12:00:00Z"}
+	windowEnd := windowStart.Add(5 * time.Minute)
+	got := outputUploadRcloneArgs(windowStart, windowEnd)
+	want := []string{
+		"--update",
+		"--max-age", "2026-08-02T12:00:00Z",
+		"--min-age", "2026-08-02T12:05:00Z",
+	}
 	if len(got) != len(want) {
 		t.Fatalf("outputUploadRcloneArgs() = %v, want %v", got, want)
 	}
@@ -371,6 +376,76 @@ func TestUploadArtifactManifestEntries_ConventionOutputUsesCanonicalObject(t *te
 	}
 	if result.Status != runner.UploadStatusOK || result.Bytes != int64(len("weights")) {
 		t.Fatalf("result = %+v, want one successful payload", result)
+	}
+}
+
+func TestUploadArtifactManifestEntries_AttemptOutputUsesRetrievableOutputKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeRcloneOK(t)
+	workDir := t.TempDir()
+	rel := ".agent-execution/results/model-call-7.json"
+	resultPath := filepath.Join(workDir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, []byte(`{"status":"completed"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifacts.WriteManifestFile(runner.ExpandTilde(artifacts.RemoteManifestPath(69)), artifacts.Manifest{
+		JobID: 69, Artifacts: []artifacts.ArtifactSpec{{Path: rel}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := captureArtifactUploads(t)
+	end := time.Now().Unix()
+
+	result := uploadArtifactManifestEntriesForAttempt(
+		"bucket", 69, 12, workDir, nil,
+		[]runner.OutputFile{{RelPath: rel, SizeBytes: int64(len(`{"status":"completed"}`))}},
+		end,
+	)
+
+	if result.Status != runner.UploadStatusOK || len(*calls) != 1 {
+		t.Fatalf("result = %+v uploads = %+v, want one successful publication", result, *calls)
+	}
+	want := r2keys.JobAttemptOutputsPrefix(69, 12) + rel
+	if (*calls)[0].dest != want || (*calls)[0].command != "copyto" {
+		t.Fatalf("upload = %+v, want retrievable attempt output %q", (*calls)[0], want)
+	}
+}
+
+func TestUploadArtifactManifestEntries_LateRecoveryRejectsSuccessorOverwrite(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeRcloneOK(t)
+	workDir := t.TempDir()
+	rel := ".agent-execution/results/model-call-8.json"
+	resultPath := filepath.Join(workDir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, []byte("successor"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	end := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	late := end.Add(artifacts.AttemptOutputEndSlack + time.Minute)
+	if err := os.Chtimes(resultPath, late, late); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifacts.WriteManifestFile(runner.ExpandTilde(artifacts.RemoteManifestPath(70)), artifacts.Manifest{
+		JobID: 70, Artifacts: []artifacts.ArtifactSpec{{Path: rel}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := captureArtifactUploads(t)
+
+	result := uploadArtifactManifestEntriesForAttempt(
+		"bucket", 70, 13, workDir, nil,
+		[]runner.OutputFile{{RelPath: rel, SizeBytes: int64(len("successor"))}},
+		end.Unix(),
+	)
+
+	if result.Status != runner.UploadStatusFailed || len(*calls) != 0 {
+		t.Fatalf("result = %+v uploads = %+v, want fenced failure without publishing successor bytes", result, *calls)
 	}
 }
 

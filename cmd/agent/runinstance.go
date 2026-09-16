@@ -389,12 +389,10 @@ func phaseCallback(r2Bucket, phaseKey string, jobID int64, setPhase func(string)
 
 // uploadOutputDirs uploads convention-based output directories to R2.
 //
-// sinceUnix is the attempt's start time; files modified before it are not
-// uploaded under this job's prefix. Without the window, the walk would also
-// upload a prior same-workdir job's leftovers under this job's keys (spec:
-// invariant Attribution in specs/job-lifecycle.allium). Pass 0 to disable
-// (restaged outputs, unknown start).
-func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUnix int64, outputDirs []string) runner.OutputUploadResult {
+// sinceUnix and untilUnix fence the walk to the attempt. Without both bounds,
+// a shared workdir's predecessor leftovers or successor writes can be uploaded
+// under this attempt's prefix. A zero bound disables that side of the window.
+func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUnix, untilUnix int64, outputDirs []string) runner.OutputUploadResult {
 	startedAt := time.Now()
 	var result runner.OutputUploadResult
 	var attempted int
@@ -402,7 +400,10 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUn
 	var totalDuration time.Duration
 	workDir = runner.ExpandTilde(workDir)
 	windowStart := runner.AttemptOutputThreshold(sinceUnix)
-
+	var windowEnd time.Time
+	if untilUnix > 0 {
+		windowEnd = time.Unix(untilUnix, 0).Add(artifacts.AttemptOutputEndSlack)
+	}
 	for _, dir := range config.EffectiveOutputDirs(outputDirs) {
 		dir = strings.TrimRight(dir, "/")
 		dirPath := filepath.Join(workDir, dir)
@@ -410,7 +411,7 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUn
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		fileCount, bytes, measured := measureUploadTreeSince(dirPath, windowStart)
+		fileCount, bytes, measured := measureUploadTreeWindow(dirPath, windowStart, windowEnd)
 		if measured && fileCount == 0 {
 			// Everything in the dir predates this attempt; nothing to upload.
 			continue
@@ -425,7 +426,7 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUn
 		opts.Source = dirPath + "/"
 		opts.DestRemote = "r2:" + bucket + "/" + r2keys.JobAttemptOutputDir(jobID, runID, dir)
 		opts.Command = "copy"
-		opts.Extra = outputUploadRcloneArgs(windowStart)
+		opts.Extra = outputUploadRcloneArgs(windowStart, windowEnd)
 		opts.TotalBytes = bytes
 		drainResult := drainAndMarkWithRetry(context.Background(), bucket, drainTarget{
 			JobID: jobID, RunID: runID, Label: fmt.Sprintf("output dir=%s", dir),
@@ -477,6 +478,17 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUn
 var uploadArtifactObject = rcloneUploadWithRetry
 
 func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir string, outputDirs []string) runner.OutputUploadResult {
+	return uploadArtifactManifestEntriesForAttempt(bucket, jobID, runID, workDir, outputDirs, nil, 0)
+}
+
+func uploadArtifactManifestEntriesForAttempt(
+	bucket string,
+	jobID, runID int64,
+	workDir string,
+	outputDirs []string,
+	outputFiles []runner.OutputFile,
+	endUnix int64,
+) runner.OutputUploadResult {
 	startedAt := time.Now()
 	manifestPath := runner.ExpandTilde(artifacts.RemoteManifestPath(jobID))
 	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
@@ -534,6 +546,15 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 		remotePath := artifacts.ResolveRemotePath(root, spec.Path)
 		remotePath = runner.ExpandTilde(remotePath)
 		info, statErr := os.Stat(remotePath)
+		if statErr == nil && endUnix > 0 {
+			late, fenceErr := outputPathModifiedAfter(remotePath, time.Unix(endUnix, 0).Add(artifacts.AttemptOutputEndSlack))
+			switch {
+			case fenceErr != nil:
+				statErr = fmt.Errorf("inspect artifact attempt fence: %w", fenceErr)
+			case late:
+				statErr = fmt.Errorf("artifact was modified after attempt end bound")
+			}
+		}
 		entry := uploadEntry{spec: spec, remotePath: remotePath, info: info, statErr: statErr, coveredBy: -1}
 		if statErr != nil {
 			entries = append(entries, entry)
@@ -541,7 +562,7 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 		}
 		localRel := filepath.ToSlash(artifacts.LocalRelativePath(spec.Path))
 		dest := filesPrefix + localRel
-		if outputRel, ok := r2resolve.ConventionOutputRelPath(manifest, spec.Path, outputDirs); ok {
+		if outputRel, ok := attemptOutputRelPath(manifest, workDir, spec.Path, outputDirs, outputFiles); ok {
 			dest = outputsPrefix + outputRel
 		}
 		if info.IsDir() {
@@ -634,14 +655,74 @@ func keyWithin(parent, child string) bool {
 	child = strings.TrimRight(child, "/")
 	return child != parent && strings.HasPrefix(child, parent+"/")
 }
+func attemptOutputRelPath(
+	manifest artifacts.Manifest,
+	workDir, artifactPath string,
+	outputDirs []string,
+	outputFiles []runner.OutputFile,
+) (string, bool) {
+	if rel, ok := r2resolve.ConventionOutputRelPath(manifest, artifactPath, outputDirs); ok {
+		return rel, true
+	}
+	if len(outputFiles) == 0 {
+		return "", false
+	}
+	root := runner.ExpandTilde(artifacts.ResolveArtifactRoot(manifest, workDir))
+	remotePath := runner.ExpandTilde(artifacts.ResolveRemotePath(root, artifactPath))
+	workDir = runner.ExpandTilde(workDir)
+	rel, err := filepath.Rel(filepath.Clean(workDir), filepath.Clean(remotePath))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	for _, output := range outputFiles {
+		captured := filepath.ToSlash(filepath.Clean(filepath.FromSlash(output.RelPath)))
+		if captured == rel || strings.HasPrefix(captured, strings.TrimRight(rel, "/")+"/") {
+			return rel, true
+		}
+	}
+	return "", false
+}
 
-// outputUploadRcloneArgs builds the rclone filter args for a convention-output
-// upload. A non-zero windowStart becomes an absolute --max-age bound so rclone
-// skips files modified before the attempt began.
-func outputUploadRcloneArgs(windowStart time.Time) []string {
+func outputPathModifiedAfter(root string, bound time.Time) (bool, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return info.ModTime().After(bound), nil
+	}
+	late := false
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if info.ModTime().After(bound) {
+			late = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return late, err
+}
+
+// outputUploadRcloneArgs builds the rclone filter args for an attempt-scoped
+// convention-output upload. Absolute bounds keep delayed recovery from
+// attributing a predecessor's leftovers or a successor's overwrite.
+func outputUploadRcloneArgs(windowStart, windowEnd time.Time) []string {
 	args := []string{"--update"}
 	if !windowStart.IsZero() {
 		args = append(args, "--max-age", windowStart.UTC().Format(time.RFC3339))
+	}
+	if !windowEnd.IsZero() {
+		args = append(args, "--min-age", windowEnd.UTC().Format(time.RFC3339))
 	}
 	return args
 }
@@ -717,13 +798,12 @@ func mergeUploadResults(dst, src *runner.OutputUploadResult) {
 }
 
 func measureUploadTree(root string) (files int, bytes int64, ok bool) {
-	return measureUploadTreeSince(root, time.Time{})
+	return measureUploadTreeWindow(root, time.Time{}, time.Time{})
 }
 
-// measureUploadTreeSince counts files and bytes under root, skipping files
-// modified before since (zero = no filter), matching the --max-age bound the
-// upload itself applies.
-func measureUploadTreeSince(root string, since time.Time) (files int, bytes int64, ok bool) {
+// measureUploadTreeWindow counts files and bytes under root inside the same
+// absolute attempt window the rclone upload applies.
+func measureUploadTreeWindow(root string, since, until time.Time) (files int, bytes int64, ok bool) {
 	ok = true
 	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -742,6 +822,9 @@ func measureUploadTreeSince(root string, since time.Time) (files int, bytes int6
 		if !since.IsZero() && info.ModTime().Before(since) {
 			return nil
 		}
+		if !until.IsZero() && info.ModTime().After(until) {
+			return nil
+		}
 		files++
 		bytes += info.Size()
 		return nil
@@ -749,6 +832,10 @@ func measureUploadTreeSince(root string, since time.Time) (files int, bytes int6
 		return 0, 0, false
 	}
 	return files, bytes, true
+}
+
+func measureUploadTreeSince(root string, since time.Time) (files int, bytes int64, ok bool) {
+	return measureUploadTreeWindow(root, since, time.Time{})
 }
 
 func bytesForMaxDrain(opts r2upload.Options) int64 {
@@ -1091,7 +1178,7 @@ func startOutputUploader(bucket string, jobID, runID int64, workDir string, sinc
 	workDir = runner.ExpandTilde(workDir)
 	upload := func() {
 		_ = uploadArtifactManifestEntries(bucket, jobID, runID, workDir, outputDirs)
-		_ = uploadOutputDirs(bucket, jobID, runID, workDir, sinceUnix, outputDirs)
+		_ = uploadOutputDirs(bucket, jobID, runID, workDir, sinceUnix, 0, outputDirs)
 	}
 
 	fatalAgentGo("output-uploader", func() {
