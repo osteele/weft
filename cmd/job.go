@@ -1955,11 +1955,23 @@ func renderJobInfoFromLedger(w, errW io.Writer, database *sql.DB, job *db.Job) e
 		fmt.Fprintf(w, "Error:       %s\n", job.ErrorMessage)
 	}
 	printJobLocalDiagnostics(w, database, job)
+	historyCost, hasHistoryCost := estimate.RentalHistoryCostSummary(database, job, now)
 	if rentalSummary, ok := estimate.RentalCostSummary(database, job, now); ok {
+		label := "Cost:"
+		if hasHistoryCost {
+			label = "Latest cost:"
+		}
 		if rentalSummary.Provisional {
-			fmt.Fprintf(w, "Cost:        $%.2f (provisional; %s to date, finalized after teardown)\n", rentalSummary.Cost, rentalSummary.Basis)
+			fmt.Fprintf(w, "%-12s $%.2f (provisional; %s to date, finalized after teardown)\n", label, rentalSummary.Cost, rentalSummary.Basis)
 		} else {
-			fmt.Fprintf(w, "Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
+			fmt.Fprintf(w, "%-12s $%.2f (%s)\n", label, rentalSummary.Cost, rentalSummary.Basis)
+		}
+	}
+	if hasHistoryCost {
+		if historyCost.Provisional {
+			fmt.Fprintf(w, "Total cost:  $%.2f (provisional; %d rental instances to date)\n", historyCost.Cost, historyCost.Launches)
+		} else {
+			fmt.Fprintf(w, "Total cost:  $%.2f (%d rental instances)\n", historyCost.Cost, historyCost.Launches)
 		}
 	}
 	if progress := jobProgressSummary(database, job); progress != "" {

@@ -9,6 +9,13 @@ import (
 	"strings"
 )
 
+// CUDAHardwareFaultPattern matches diagnostic evidence, not bare topic words.
+// In particular, Xid requires an NVIDIA report shape so ordinary words such as
+// "oxidized" cannot terminate a GPU job.
+const CUDAHardwareFaultPattern = `(?is)(?:peer GPU memory|uncorrectable ECC|\bNVLink\b[^\n]*(?:error|fault|failed|failure)|(?:error|fault|failed|failure)[^\n]*\bNVLink\b|\bNVRM:\s*Xid\b|\bXid\b(?:\s*\([^)\n]*\))?\s*[:=]?\s*\d+\b)`
+
+var cudaHardwareFaultRE = regexp.MustCompile(CUDAHardwareFaultPattern)
+
 // FailureModePrediction is a posterior failure probability for one placement
 // scope. Probability is a Beta-Binomial posterior mean.
 type FailureModePrediction struct {
@@ -396,16 +403,12 @@ func ClassifyFailureMode(failureReason, diagnosis, message string, exitCode int)
 	}
 }
 
-// CUDAHardwareFaultText reports whether failure text carries the log
-// signature of a CUDA hardware fault (bad rental GPU/interconnect): peer
-// GPU memory errors, NVLink faults, uncorrectable ECC, or Xid reports.
+// CUDAHardwareFaultText reports whether failure text carries diagnostic
+// evidence of a bad rental GPU or interconnect. Bare hardware vocabulary is
+// insufficient because logs can contain arbitrary user-program output.
 // Shared by ClassifyInfraFailure (runtime phase) and ClassifyFailureMode.
 func CUDAHardwareFaultText(text string) bool {
-	text = strings.ToLower(text)
-	return strings.Contains(text, "peer gpu memory") ||
-		strings.Contains(text, "nvlink") ||
-		strings.Contains(text, "uncorrectable ecc") ||
-		strings.Contains(text, "xid")
+	return cudaHardwareFaultRE.MatchString(text)
 }
 
 func diagnosisPattern(diagnosis string) string {

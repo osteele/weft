@@ -94,6 +94,18 @@ func TestClassifyInfraFailure(t *testing.T) {
 			wantInfra:  true,
 		},
 		{
+			name:     "runtime ordinary xid substring stays user-attributed",
+			phase:    PhaseRuntime,
+			exitCode: 1,
+			logTail:  "the coin may have oxidized",
+		},
+		{
+			name:     "runtime bare nvlink topic stays user-attributed",
+			phase:    PhaseRuntime,
+			exitCode: 1,
+			logTail:  "benchmark compares nvlink bandwidth",
+		},
+		{
 			name:     "runtime plain failure stays user-attributed",
 			phase:    PhaseRuntime,
 			exitCode: 1,

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/osteele/weft/internal/db"
 )
 
 // pattern is a compiled error pattern matcher.
@@ -90,7 +92,7 @@ var specificCauseRules = []failurePatternRule{
 		message:    "CUDA hardware or interconnect fault",
 		solution:   "Retry on a fresh instance; the failing rental likely has a bad GPU, NVLink/peer-memory path, or driver/device state.",
 		confidence: 0.95,
-		re:         regexp.MustCompile(`(?is)(?:peer GPU memory|NVLink|uncorrectable ECC|Xid)`),
+		re:         regexp.MustCompile(db.CUDAHardwareFaultPattern),
 	},
 	{
 		patternID:  "cli_argument_drift",
@@ -725,7 +727,7 @@ var envPatterns = []*pattern{
 		enrich:    enrichGPUOOMDiagnosis,
 	},
 	{
-		re:             regexp.MustCompile(`(?is)(?:peer GPU memory|NVLink|uncorrectable ECC|Xid)`),
+		re:             regexp.MustCompile(db.CUDAHardwareFaultPattern),
 		patternID:      "cuda_hardware_fault",
 		category:       "environment",
 		message:        "CUDA hardware or interconnect fault",

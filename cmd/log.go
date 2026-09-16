@@ -241,7 +241,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 		} else {
 			job, _ := db.GetJobByID(database, jobID)
 			if job != nil {
-				printPostLogDiagnostics(job)
+				printPostLogDiagnostics(job, logAttempt)
 			}
 		}
 	}
@@ -1463,8 +1463,13 @@ func processCarriageReturns(content string) string {
 	return strings.Join(result, "\n")
 }
 
-// printPostLogDiagnostics shows diagnosis info after log output for failed jobs.
-func printPostLogDiagnostics(job *db.Job) {
+// printPostLogDiagnostics shows current-attempt diagnosis info after log
+// output. Explicit historical-attempt reads already carry their own log
+// evidence and must not append metadata from the job's latest attempt.
+func printPostLogDiagnostics(job *db.Job, requestedAttempt int) {
+	if requestedAttempt > 0 {
+		return
+	}
 	if progress := jobProgressSummary(nil, job); progress != "" {
 		fmt.Println()
 		fmt.Printf("--- progress: %s ---\n", progress)

@@ -818,3 +818,18 @@ func TestShouldUseCloudLogsFalseWhenLatestAttemptIsInventory(t *testing.T) {
 		t.Fatalf("shouldUseCloudLogs() = true, want false; latest attempt should be inventory cool30. attempts=%+v", attempts)
 	}
 }
+
+func TestPrintPostLogDiagnosticsSkipsExplicitAttempt(t *testing.T) {
+	job := &db.Job{
+		ID:             8224,
+		Status:         db.StatusFailed,
+		ErrorDiagnosis: `{"pattern":"cuda_hardware_fault","message":"CUDA hardware or interconnect fault"}`,
+	}
+
+	out := captureStdout(t, func() {
+		printPostLogDiagnostics(job, 1)
+	})
+	if out != "" {
+		t.Fatalf("historical attempt appended latest-attempt diagnostics: %q", out)
+	}
+}

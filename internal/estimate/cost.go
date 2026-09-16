@@ -14,6 +14,12 @@ type RentalCostInfo struct {
 	Provisional bool
 }
 
+type RentalHistoryCostInfo struct {
+	Cost        float64
+	Launches    int
+	Provisional bool
+}
+
 func LaunchCostSoFar(launch *db.Launch, now time.Time) float64 {
 	if launch == nil {
 		return 0
@@ -78,4 +84,41 @@ func RentalCostSummary(database *sql.DB, job *db.Job, now time.Time) (RentalCost
 		Basis:       "shared instance: setup + run",
 		Provisional: !launch.IsTerminal(),
 	}, true
+}
+
+// RentalHistoryCostSummary totals launches attributable only to this job.
+// Shared launches are excluded because an instance total cannot be assigned to
+// one job without a supported allocation record.
+func RentalHistoryCostSummary(database *sql.DB, job *db.Job, now time.Time) (RentalHistoryCostInfo, bool) {
+	if database == nil || job == nil {
+		return RentalHistoryCostInfo{}, false
+	}
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil {
+		return RentalHistoryCostInfo{}, false
+	}
+	launchIDs := make(map[int64]struct{})
+	for _, attempt := range attempts {
+		if attempt.LaunchID != nil && *attempt.LaunchID > 0 {
+			launchIDs[*attempt.LaunchID] = struct{}{}
+		}
+	}
+	if len(launchIDs) < 2 {
+		return RentalHistoryCostInfo{}, false
+	}
+
+	info := RentalHistoryCostInfo{Launches: len(launchIDs)}
+	for launchID := range launchIDs {
+		launch, err := db.GetLaunch(database, launchID)
+		if err != nil || launch == nil {
+			return RentalHistoryCostInfo{}, false
+		}
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, launchID)
+		if err != nil || len(jobs) != 1 || jobs[0] == nil || jobs[0].ID != job.ID {
+			return RentalHistoryCostInfo{}, false
+		}
+		info.Cost += LaunchCostSoFar(launch, now)
+		info.Provisional = info.Provisional || !launch.IsTerminal()
+	}
+	return info, true
 }

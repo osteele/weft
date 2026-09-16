@@ -190,6 +190,23 @@ rule DiagnosisEvidenceExcludesHarnessNarration {
         -- design "Execution timed out" (wb68).
 }
 
+-- Hardware diagnosis requires an error-shaped signature. A bare topic word
+-- such as "NVLink" is user output, and the characters "xid" inside a word
+-- such as "oxidized" are not an NVIDIA Xid report.
+rule CUDAHardwareDiagnosisRequiresDiagnosticEvidence {
+    when: LogClassificationRequested(log, entry_point)
+
+    ensures:
+        -- cuda_hardware_fault requires peer-memory or uncorrectable-ECC text,
+        -- NVLink together with failure text, or an NVIDIA Xid report carrying
+        -- a report marker or numeric code.
+
+    -- legacy annotation: @guidance
+        -- Implementation: db.CUDAHardwareFaultPattern, shared by post-mortem
+        -- failure classification and remediation's live fatal-log scanner.
+        -- Regression: wb143.
+}
+
 -- The log is one source of evidence; the exit status is another, and it is
 -- the harder one to fake. A diagnosis that the exit status contradicts is
 -- withheld rather than surfaced.

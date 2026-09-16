@@ -227,6 +227,18 @@ func TestDetectFailureReasonFromExitInfoAndLog_CUDAHardwareFault(t *testing.T) {
 	}
 }
 
+func TestDetectFailureReasonFromExitInfoAndLog_IgnoresOrdinaryXidSubstring(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "job.log")
+	if err := os.WriteFile(logPath, []byte("The coin may have oxidized over time.\nRuntimeError: interrupted-sigterm\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+
+	got := DetectFailureReasonFromExitInfoAndLog(ExitInfo{ExitCode: 1}, logPath)
+	if got != FailureReasonError {
+		t.Fatalf("DetectFailureReasonFromExitInfoAndLog() = %q, want %q", got, FailureReasonError)
+	}
+}
+
 func writeFakeCommand(t *testing.T, dir, name, script string) {
 	t.Helper()
 	path := filepath.Join(dir, name)

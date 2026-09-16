@@ -347,6 +347,14 @@ func TestCheckFatalAtRuntime_CUDAHardwareFault(t *testing.T) {
 	}
 }
 
+func TestCheckFatalAtRuntime_IgnoresOrdinaryXidSubstring(t *testing.T) {
+	log := "The coin may have oxidized over time.\nProgress: 349/984\n"
+
+	if d := CheckFatalAtRuntime(log); d != nil {
+		t.Fatalf("ordinary output classified as fatal: %+v", d)
+	}
+}
+
 func TestCheckFatalAtRuntime_CUDARuntimeError(t *testing.T) {
 	log := `RuntimeError: CUDA error: unspecified launch failure
 CUDA kernel errors might be asynchronously reported`

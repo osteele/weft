@@ -31,6 +31,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **CUDA failure attribution and retry history**: Hardware-fault detection
+  requires diagnostic Xid, NVLink, peer-memory, or ECC evidence, so ordinary
+  output such as "oxidized" cannot terminate a GPU job. Job info reports the
+  cumulative cost of exclusive rental attempts, and `log --attempt` does not
+  append progress or diagnosis from the latest attempt.
 - **Bounded cloud completion sync**: Routine sync retries incomplete terminal
   completion metadata for 24 hours after a launch ends. Older rows remain
   eligible for the explicit historical R2 repair sweep without consuming every
