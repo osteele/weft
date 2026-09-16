@@ -36,6 +36,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   output such as "oxidized" cannot terminate a GPU job. Job info reports the
   cumulative cost of exclusive rental attempts, and `log --attempt` does not
   append progress or diagnosis from the latest attempt.
+- **Torch 2.6 placement compatibility**: CUDA wheel variants now cap compatible
+  devices at Hopper (`sm_90`), preventing unsupported Blackwell rentals while
+  preserving the supported boundary.
+- **Queue start ownership**: Start-now reconciliation recognizes an active,
+  attempt-fenced Studio queue writer and preserves the open attempt when runner
+  evidence is unavailable, preventing false terminal states and duplicate work.
+- **Studio producer dependencies**: R2-pull dispatch stages `--needs` payloads
+  only from the completed producer's authoritative attempt publication. Missing,
+  pending, failed, or mismatched publication evidence blocks dispatch visibly.
+- **Recovered review results**: Inventory recovery republishes declared
+  `.agent-execution` result files through the attempt-scoped output boundary
+  after waiter loss without re-executing the worker command.
 - **Bounded cloud completion sync**: Routine sync retries incomplete terminal
   completion metadata for 24 hours after a launch ends. Older rows remain
   eligible for the explicit historical R2 repair sweep without consuming every
