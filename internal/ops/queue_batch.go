@@ -291,7 +291,7 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 		default:
 			if status.ExitCode != nil {
 				if status.FromR2 {
-					result, err := syncJobStatusFromR2(database, job)
+					result, err := syncJobStatusFromR2ForBatch(database, job)
 					if err != nil {
 						slog.Debug("R2 runner reported completion before result marker was readable", "component", "sync", "job_id", job.ID, "error", err)
 						continue

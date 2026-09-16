@@ -136,6 +136,147 @@ func TestFetchQueueBatchStatusMapsFreshR2RunnerState(t *testing.T) {
 	}
 }
 
+func TestSyncJobActiveExactQueueWriterSurvivesMissingStatusAndLaterCompletes(t *testing.T) {
+	originalLoad, originalStore := loadQueueConfig, newInventoryQueueStore
+	originalCompletionSync := syncJobStatusFromR2ForBatch
+	originalWriterFetch := fetchR2RunnerStateForWriter
+	originalTmuxProbe, originalStatusRead := tmuxSessionExistsForSync, readStatusFileForSync
+	t.Cleanup(func() {
+		loadQueueConfig, newInventoryQueueStore = originalLoad, originalStore
+		syncJobStatusFromR2ForBatch = originalCompletionSync
+		fetchR2RunnerStateForWriter = originalWriterFetch
+		tmuxSessionExistsForSync, readStatusFileForSync = originalTmuxProbe, originalStatusRead
+	})
+	loadQueueConfig = func() (*config.Config, error) {
+		return &config.Config{Hosts: map[string]config.HostConfig{
+			"studio": {QueueTransport: queueTransportR2Pull},
+		}}, nil
+	}
+	tmuxProbes, statusReads := 0, 0
+	tmuxSessionExistsForSync = func(string, string, time.Duration) (bool, error) {
+		tmuxProbes++
+		return false, nil
+	}
+	readStatusFileForSync = func(string, string, time.Duration) (*StatusFileResult, error) {
+		statusReads++
+		return nil, nil
+	}
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "true", "active writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateQueuedToRunningWithSession(database, jobID, "rj-active-writer"); err != nil {
+		t.Fatal(err)
+	}
+	meta := &db.JobMetadata{Source: &db.JobSourceMetadata{Execution: &db.JobSourceExecutionMetadata{
+		DispatchMode:   "pinned_inventory_manifest",
+		Verification:   db.SourceVerificationVerified,
+		VerifiedSHA256: "pinned-source",
+	}}}
+	if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job.LatestRunID == nil {
+		t.Fatalf("load active attempt: job=%+v err=%v", job, err)
+	}
+	runID := *job.LatestRunID
+
+	key, _ := inventoryqueue.StateKey("studio")
+	store := &fakeInventoryQueueStore{objects: map[string][]byte{}}
+	newInventoryQueueStore = func() (inventoryQueueStore, error) { return store, nil }
+	publishState := func(runnerState opsqueue.RunnerState) {
+		t.Helper()
+		encoded, encodeErr := json.Marshal(inventoryqueue.State{
+			Version: inventoryqueue.Version, Host: "studio", UpdatedAt: time.Now(), Runner: runnerState,
+		})
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		store.objects[key] = encoded
+	}
+	publishState(opsqueue.RunnerState{Running: map[string]opsqueue.RunnerJobState{
+		fmt.Sprint(jobID): {
+			RunID: runID, StartedAt: 1_700_000_000,
+			StatusFile: opsqueue.ObservationAbsent, Process: opsqueue.ObservationAbsent,
+		},
+	}})
+	completionReady := false
+	syncJobStatusFromR2ForBatch = func(database *sql.DB, observed *db.Job) (SyncResult, error) {
+		if !completionReady {
+			return SyncResult{}, fmt.Errorf("completion not published yet")
+		}
+		if observed.LatestRunID == nil || *observed.LatestRunID != runID {
+			t.Fatalf("completion attempt = %v, want %d", observed.LatestRunID, runID)
+		}
+		if recordErr := RecordJobAttemptCompletion(database, jobID, runID, 0, 1_700_000_000, 1_700_000_100); recordErr != nil {
+			return SyncResult{}, recordErr
+		}
+		return SyncResult{Updated: true}, nil
+	}
+
+	fetchR2RunnerStateForWriter = func(string) (*opsqueue.RunnerState, error) {
+		return nil, fmt.Errorf("runner observation unavailable")
+	}
+	if _, err := SyncJob(database, job, SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusRunning || job.SessionName != "rj-active-writer" ||
+		job.ExitCode != nil || job.EndTime != nil {
+		t.Fatalf("unknown writer observation changed open attempt: %+v", job)
+	}
+	if tmuxProbes != 1 || statusReads != 1 {
+		t.Fatalf("unknown observation probes = tmux %d status %d, want 1 each", tmuxProbes, statusReads)
+	}
+	fetchR2RunnerStateForWriter = originalWriterFetch
+
+	if _, err := SyncJob(database, job, SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if tmuxProbes != 1 || statusReads != 1 {
+		t.Fatalf("active writer fell through to tmux reconciliation: tmux %d status %d", tmuxProbes, statusReads)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusRunning || job.ExitCode != nil || job.EndTime != nil {
+		t.Fatalf("missing status made active writer terminal: %+v", job)
+	}
+	if job.SessionName != "" || job.LatestRunID == nil || *job.LatestRunID != runID {
+		t.Fatalf("writer ownership was not restored to exact attempt: session=%q run=%v", job.SessionName, job.LatestRunID)
+	}
+	if job.Metadata == nil || job.Metadata.Source == nil || job.Metadata.Source.Execution == nil ||
+		job.Metadata.Source.Execution.VerifiedSHA256 != "pinned-source" {
+		t.Fatalf("source provenance changed during ownership recovery: %+v", job.Metadata)
+	}
+
+	completionReady = true
+	publishState(opsqueue.RunnerState{Finished: map[string]opsqueue.RunnerFinishedState{
+		fmt.Sprint(jobID): {ExitCode: 0, FinishedAt: 1_700_000_100},
+	}})
+	if _, err := SyncJob(database, job, SyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusCompleted || job.ExitCode == nil || *job.ExitCode != 0 ||
+		job.LatestRunID == nil || *job.LatestRunID != runID {
+		t.Fatalf("authoritative completion did not converge exact attempt: %+v", job)
+	}
+}
+
 func TestR2PreflightRejectionReconcilesWithoutRedispatch(t *testing.T) {
 	originalLoad, originalStore := loadQueueConfig, newInventoryQueueStore
 	t.Cleanup(func() { loadQueueConfig, newInventoryQueueStore = originalLoad, originalStore })

@@ -707,7 +707,25 @@ func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*Re
 	// Probe remote state
 	remoteStatus := ""
 	var err error
-	if job.UsesSlurm() {
+	writerEvidence := observeExactQueueWriter(job)
+	if writerEvidence == exactQueueWriterUnknown &&
+		job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning {
+		// The start-now handoff cannot safely launch a second writer until a
+		// fresh runner snapshot says whether the exact attempt is already
+		// owned. Keep the durable intent pending and retry observation later.
+		return &ReconcileResult{Action: "none", Resolution: "queue writer observation unknown"}, nil
+	}
+	if writerEvidence == exactQueueWriterActive {
+		if err := db.ClearSessionName(database, job.ID); err != nil {
+			return nil, err
+		}
+		job.SessionName = ""
+		remoteStatus = db.StatusRunning
+	}
+	if writerEvidence == exactQueueWriterActive {
+		// The attempt-fenced queue writer wins ownership over the tentative
+		// tmux handoff. Reconcile against that positive running observation.
+	} else if job.UsesSlurm() {
 		info, probeErr := probeSlurmInfo(job, opts.Timeout)
 		if probeErr != nil {
 			err = probeErr

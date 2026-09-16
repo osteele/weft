@@ -193,7 +193,11 @@ type remoteQueue interface {
 	Rusage(host string, jobID int64, timeout time.Duration) (string, error)
 }
 
-var queueRemoteClient remoteQueue = sshQueueRemote{}
+var (
+	queueRemoteClient        remoteQueue = sshQueueRemote{}
+	tmuxSessionExistsForSync             = ssh.TmuxSessionExistsQuickTimeout
+	readStatusFileForSync                = ReadStatusFile
+)
 
 func setQueueRemoteClientForTesting(client remoteQueue) func() {
 	prev := queueRemoteClient
@@ -205,6 +209,19 @@ func setQueueRemoteClientForTesting(client remoteQueue) func() {
 // Returns SyncResult indicating whether the job was updated and whether the host was contacted.
 // This is the full sync version that uses multiple SSH calls for maximum accuracy.
 func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult, err error) {
+	writerEvidence := observeExactQueueWriter(job)
+	writerOwnershipRecovered := false
+	if writerEvidence == exactQueueWriterActive {
+		// A start-now handoff may have assigned a tmux session after the queue
+		// runner had already started this exact attempt. The fenced writer is
+		// authoritative ownership evidence; restore queue-runner reconciliation
+		// before any missing-session branch can declare the attempt dead.
+		if err := db.ClearSessionName(database, job.ID); err != nil {
+			return SyncResult{}, err
+		}
+		job.SessionName = ""
+		writerOwnershipRecovered = true
+	}
 	if job != nil && job.UsesQueueRunner() && hostUsesR2Queue(job.Host) {
 		updated, err := BatchSyncQueueRunnerJobs(database, job.Host, []*db.Job{job}, opts.Timeout)
 		if err != nil {
@@ -213,9 +230,9 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 			// pass. The dispatcher records its own publish failure if R2 itself is
 			// unavailable.
 			slog.Debug("R2 inventory runner state unavailable", "component", "sync", "host", job.Host, "job_id", job.ID, "error", err)
-			return SyncResult{}, nil
+			return SyncResult{Updated: writerOwnershipRecovered}, nil
 		}
-		return SyncResult{Updated: updated > 0, HostContacted: true}, nil
+		return SyncResult{Updated: writerOwnershipRecovered || updated > 0, HostContacted: true}, nil
 	}
 	oldStatus := job.Status
 	defer func() {
@@ -262,7 +279,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 	// Regular jobs have their own tmux sessions
 	timeout := effectiveSyncTimeout(opts.Timeout)
 	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	exists, err := ssh.TmuxSessionExistsQuickTimeout(job.Host, tmuxSession, timeout)
+	exists, err := tmuxSessionExistsForSync(job.Host, tmuxSession, timeout)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -319,7 +336,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 	// Session doesn't exist - check for status file (no retry for sync)
 	// First try exact path (uses job.StartTime)
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-	sfResult, err := ReadStatusFile(job.Host, statusFile, timeout)
+	sfResult, err := readStatusFileForSync(job.Host, statusFile, timeout)
 	if err != nil {
 		return SyncResult{HostContacted: true}, err
 	}
@@ -339,6 +356,14 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 		_ = syncJobTimeseries(database, job, timeout)
 		_ = syncJobTelemetry(database, job, timeout)
 		return SyncResult{Updated: true, HostContacted: true}, nil
+	}
+
+	if writerEvidence == exactQueueWriterUnknown {
+		// Missing tmux and status files are not proof of exit while the fresh
+		// runner observation needed to disambiguate a start-now handoff is
+		// unavailable. Preserve the open attempt for a later authoritative
+		// runner state or completion.
+		return SyncResult{HostContacted: true}, nil
 	}
 
 	// Session doesn't exist and no status file.

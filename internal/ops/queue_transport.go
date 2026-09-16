@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventoryqueue"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/r2"
@@ -35,6 +37,17 @@ var (
 	}
 	appendQueueCommandSSH = opsqueue.AppendCommand
 )
+
+type exactQueueWriterEvidence uint8
+
+const (
+	exactQueueWriterNotApplicable exactQueueWriterEvidence = iota
+	exactQueueWriterUnknown
+	exactQueueWriterAbsent
+	exactQueueWriterActive
+)
+
+var fetchR2RunnerStateForWriter = fetchR2RunnerState
 
 func queueTransportForHost(host string) (string, error) {
 	cfg, err := loadQueueConfig()
@@ -176,4 +189,50 @@ func fetchR2RunnerState(host string) (*opsqueue.RunnerState, error) {
 	state.AgentVersion = view.State.AgentVersion
 	state.UpdatedAt = view.State.UpdatedAt.Unix()
 	return state, nil
+}
+
+// observeExactQueueWriter checks whether an R2 inventory runner still owns the
+// attempt that a start-now handoff tentatively assigned to a tmux session.
+// The runner's run ID is the ownership fence: an older writer must not affect
+// the current attempt, while a missing or stale state snapshot is unknown.
+func observeExactQueueWriter(job *db.Job) exactQueueWriterEvidence {
+	if job == nil || job.UsesQueueRunner() || job.LatestRunID == nil || *job.LatestRunID <= 0 {
+		return exactQueueWriterNotApplicable
+	}
+	pendingStart := job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning
+	inventoryExecution := job.Metadata != nil &&
+		job.Metadata.Source != nil &&
+		job.Metadata.Source.Execution != nil &&
+		job.Metadata.Source.Execution.DispatchMode == "pinned_inventory_manifest"
+	if job.LastSyncedStatus != db.StatusQueued && !pendingStart && !inventoryExecution {
+		return exactQueueWriterNotApplicable
+	}
+	if !hostUsesR2Queue(job.Host) {
+		return exactQueueWriterNotApplicable
+	}
+
+	state, err := fetchR2RunnerStateForWriter(job.Host)
+	if err != nil || state == nil {
+		return exactQueueWriterUnknown
+	}
+	jobIDText := strconv.FormatInt(job.ID, 10)
+	running, ok := state.Running[jobIDText]
+	if !ok {
+		if state.Current != nil && *state.Current == job.ID {
+			return exactQueueWriterUnknown
+		}
+		for _, pendingJobID := range state.Pending {
+			if pendingJobID == job.ID {
+				return exactQueueWriterUnknown
+			}
+		}
+		return exactQueueWriterAbsent
+	}
+	if running.RunID <= 0 {
+		return exactQueueWriterUnknown
+	}
+	if running.RunID == *job.LatestRunID {
+		return exactQueueWriterActive
+	}
+	return exactQueueWriterAbsent
 }

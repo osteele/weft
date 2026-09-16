@@ -282,6 +282,35 @@ rule QueueWorkerAbsenceBecomesUnresolved {
     -- supplies the outcome and may transition unresolved to completed/failed.
 }
 
+-- Start-now can tentatively assign a tmux session while an R2-pull runner
+-- concurrently starts the queued attempt. A fresh runner entry for the exact
+-- attempt is positive ownership evidence even when its status-file and process
+-- sub-probes are absent or late. It restores queue-runner ownership rather than
+-- launching a second writer or interpreting the missing tmux session as exit.
+rule ActiveExactQueueWriterOwnsStartHandoff {
+    when: ExactQueueWriterObserved(job)
+    requires: job.latest_attempt.session_name != null
+
+    ensures: job.latest_attempt.session_name = null
+    ensures: job.status not in {completed, failed, dead, killed, canceled}
+    ensures: not DuplicateAttemptWriterStarted(job.latest_attempt)
+    ensures: AttemptSourceProvenancePreserved(job.latest_attempt)
+
+    -- A stale, missing, malformed, or unfenced runner observation cannot
+    -- decide ownership. Preserve both the open attempt and pending start intent
+    -- until a fresh exact writer or authoritative completion is observed.
+    if ExactQueueWriterObservation(job.latest_attempt) = unknown:
+        ensures: JobStatusPreserved(job)
+        ensures: PendingStartIntentPreserved(job.latest_attempt)
+
+    if AuthoritativeCompletionObserved(job.latest_attempt, exit_code):
+        if exit_code = 0:
+            ensures: job.status = completed
+        else:
+            ensures: job.status = failed
+        ensures: job.latest_attempt.exit_code = exit_code
+}
+
 -- Payload-bearing jobs fail closed at remote dispatch until the active runner
 -- publishes support for the payload staging protocol. Durable local admission
 -- is still allowed while a host is offline; the job remains queued with a
