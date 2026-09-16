@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/localmutate"
+	"github.com/osteele/weft/internal/notify"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/syncorch"
@@ -320,8 +321,22 @@ func daemonPrePassHostTimeout() time.Duration {
 	return FastSyncHostTimeout
 }
 
+// dispatchDaemonLifecycleHooks retries the durable structured-hook backlog.
+// CLI command completion never calls this: read-only commands must return after
+// producing their result, while mutation paths retain their explicit delivery
+// semantics in notify.
+func dispatchDaemonLifecycleHooks(database *sql.DB, cfg *config.Config) {
+	if database == nil || cfg == nil || len(cfg.Events.Hooks) == 0 {
+		return
+	}
+	// The legacy notification command remains tied to the terminal transition
+	// that invoked it. Daemon retry drains only run structured hooks.
+	eventConfig := &config.Config{Events: cfg.Events}
+	notify.DispatchLifecycleEvents(database, eventConfig)
+}
+
 func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, pass int, runAutopilot bool) daemonPassResult {
-	dispatchConfiguredLifecycleHooks(database, cfg)
+	dispatchDaemonLifecycleHooks(database, cfg)
 	started := time.Now()
 	var (
 		result *orchestration.GroupedAutoPilotResult

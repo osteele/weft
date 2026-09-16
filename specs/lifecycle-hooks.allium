@@ -96,10 +96,19 @@ rule RetryDueDeliveries {
         LegacyNotificationDeliveryIsNotDrainedOutsideItsTerminalTransition()
 }
 
-rule CompleteCLICommand {
-    when: WeftCLICommandCompletes()
+rule CompleteReadOnlyCLICommand {
+    when: ReadOnlyWeftCLICommandCompletes()
     ensures:
         CLIExitDoesNotDrainLifecycleHookBacklog()
+        CompletionLatencyDoesNotDependOnLifecycleHookLatency()
+        PendingHookDeliveriesRemainAvailableToDaemon()
+}
+
+rule CompleteExplicitLifecycleMutation {
+    when: WeftCLICommandCommitsLifecycleMutation(event)
+    ensures:
+        CommandSpecificImmediateDeliverySemanticsArePreserved(event)
+        HookFailureDoesNotRollBackCommittedMutation(event)
         PendingHookDeliveriesRemainAvailableToDaemon()
 }
 
