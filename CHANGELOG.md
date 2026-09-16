@@ -36,6 +36,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   output such as "oxidized" cannot terminate a GPU job. Job info reports the
   cumulative cost of exclusive rental attempts, and `log --attempt` does not
   append progress or diagnosis from the latest attempt.
+- **Live phase versus terminal attempt**: Reconciliation no longer destroys a
+  healthy rental when a fresh running phase conflicts with a stale terminal
+  attempt row. It signals the agent's per-job stop path and lets completion
+  sync close the attempt and launch.
 - **Torch 2.6 placement compatibility**: CUDA wheel variants now cap compatible
   devices at Hopper (`sm_90`), preventing unsupported Blackwell rentals while
   preserving the supported boundary.

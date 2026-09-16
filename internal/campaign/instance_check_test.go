@@ -268,10 +268,17 @@ func TestCheckInstance_GraceNotExpired(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_TerminalLiveRunningPhase_Terminates(t *testing.T) {
+func TestCheckInstance_TerminalLiveRunningPhase_SignalsStopWithoutDestroy(t *testing.T) {
 	now := time.Now()
 	terminalSince := now.Add(-5 * time.Minute)
 	r := NewReconciler()
+	var signals [][2]int64
+	originalSignal := signalLivePhaseJobKill
+	signalLivePhaseJobKill = func(jobID, launchID int64) {
+		signals = append(signals, [2]int64{jobID, launchID})
+	}
+	t.Cleanup(func() { signalLivePhaseJobKill = originalSignal })
+
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
 			ID:     1,
@@ -283,20 +290,17 @@ func TestCheckInstance_TerminalLiveRunningPhase_Terminates(t *testing.T) {
 		RunningPhaseJobTerminalSince: &terminalSince,
 		Now:                          now,
 	})
-	if action.Kind != ActionTerminalLivePhase {
-		t.Fatalf("action.Kind = %d, want ActionTerminalLivePhase (%d)", action.Kind, ActionTerminalLivePhase)
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
 	}
-	if action.TerminalStatus != db.LaunchStatusFailed {
-		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
+	if action.DestroyProvider {
+		t.Fatal("fresh running phase must not destroy the provider on stale attempt evidence")
 	}
-	if !action.DestroyProvider {
-		t.Error("DestroyProvider should be true")
+	if action.ResetJobs {
+		t.Fatal("fresh running phase must not orphan reset jobs on stale attempt evidence")
 	}
-	if !action.ResetJobs {
-		t.Error("ResetJobs should be true")
-	}
-	if action.AttemptOutcome != db.AttemptOutcomeOrphaned {
-		t.Errorf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomeOrphaned)
+	if len(signals) != 1 || signals[0] != [2]int64{537, 1} {
+		t.Fatalf("live-phase stop signals = %+v, want one signal for job 537 on launch 1", signals)
 	}
 }
 

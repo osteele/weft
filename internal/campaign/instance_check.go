@@ -10,12 +10,41 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
+
+// signalLivePhaseJobKill asks the agent to stop the actual process when a
+// fresh running phase conflicts with a stale terminal attempt row. It is a
+// package-level seam so tests can observe the signal without R2.
+var signalLivePhaseJobKill = func(jobID, launchID int64) {
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Warn("cannot signal live-phase job stop without config", "component", "reconcile", "job_id", jobID, "instance", launchID, "error", err)
+		return
+	}
+	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
+	r2Client, err := r2.New(r2.Config{
+		AccountID:       r2Cfg.AccountID,
+		AccessKeyID:     r2Cfg.AccessKeyID,
+		SecretAccessKey: r2Cfg.SecretAccessKey,
+		Bucket:          r2Cfg.Bucket,
+	})
+	if err != nil || r2Client == nil {
+		slog.Warn("cannot signal live-phase job stop without R2", "component", "reconcile", "job_id", jobID, "instance", launchID, "error", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	body := strings.NewReader(fmt.Sprintf("%d", jobID))
+	if err := r2Client.PutObject(ctx, r2keys.InstanceKillJobRequest(launchID, jobID), body, "text/plain"); err != nil {
+		slog.Warn("failed to signal live-phase job stop", "component", "reconcile", "job_id", jobID, "instance", launchID, "error", err)
+	}
+}
 
 // InstanceActionKind describes what reconciliation action should be taken.
 type InstanceActionKind int
@@ -108,6 +137,7 @@ func ComputeJobState(jobs []*db.Job, outcomes map[int64]string) JobState {
 				if displayStatus != db.StatusCanceled {
 					s.AllJobsCanceled = false
 				}
+
 				switch displayStatus {
 				case db.StatusFailed, db.StatusDead, db.StatusKilled:
 					s.AnyFailed = true
@@ -531,10 +561,12 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
-	// 3b. Impossible live phase: the sidecar/phase marker is fresh and claims
-	// a job is running, but the DB already has that launch attempt in a
-	// terminal state. Treat this as an unhealthy agent/phase loop and orphan
-	// the remaining queued attempts so they can be placed elsewhere.
+	// 3b. The phase marker and DB attempt can disagree during completion sync.
+	// A fresh running phase is positive process evidence, so a terminal attempt
+	// row alone is stale conflicting evidence, not authority to destroy the
+	// provider. Route through the shared kill signal: the agent stops the actual
+	// process and reports the outcome, after which normal completion sync makes
+	// the launch terminal. Destruction remains for confirmed dead evidence.
 	if ci.Status == db.LaunchStatusRunning && p.RunningPhaseJobTerminalSince != nil {
 		age := p.Now.Sub(*p.RunningPhaseJobTerminalSince)
 		if age > 2*time.Minute {
@@ -542,19 +574,10 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 			if status == "" {
 				status = "terminal"
 			}
-			reason := db.TerminationReasonInfraFailure
-			switch status {
-			case db.StatusFailed, db.StatusDead, db.StatusKilled:
-				reason = db.TerminationReasonJobFailure
-			}
+			signalLivePhaseJobKill(p.RunningPhaseJobID, ci.ID)
 			return InstanceAction{
-				Kind:              ActionTerminalLivePhase,
-				TerminalStatus:    db.LaunchStatusFailed,
-				TerminationReason: reason,
-				StallMessage:      fmt.Sprintf("live phase reports wj%d running, but its attempt is %s for %s — terminating instance", p.RunningPhaseJobID, status, age.Truncate(time.Second)),
-				DestroyProvider:   true,
-				ResetJobs:         true,
-				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				Kind:         ActionDisplayOnly,
+				StallMessage: fmt.Sprintf("live phase reports wj%d running, but its attempt is %s for %s — signaling job stop", p.RunningPhaseJobID, status, age.Truncate(time.Second)),
 			}
 		}
 	}

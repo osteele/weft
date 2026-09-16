@@ -3101,6 +3101,25 @@ rule HeartbeatStale {
         -- checkStaleHeartbeat / executeReconcileAction;
         -- internal/campaign/instance_check.go ExecuteAction.
 }
+rule LivePhaseConflictsWithTerminalAttempt {
+    when: EvaluateLivePhaseConflictsWithTerminalAttempt(instance)
+    requires: instance.status = running
+    requires: LiveRunningPhaseObserved(instance)
+    requires: RunningPhaseAttemptTerminal(instance)
+
+    ensures: instance.status = running
+    ensures: RunningPhaseJobStopSignaled(instance)
+    ensures: not ProviderDestroyed(instance)
+    ensures: not JobsOrphaned(instance)
+
+    -- A fresh running phase is positive process evidence. A terminal attempt
+    -- row can be stale while completion sync and phase publication disagree;
+    -- it cannot authorize provider destruction or job orphaning. Signal the
+    -- agent's durable per-job stop path, let the worker report its outcome,
+    -- and allow normal completion sync to close the launch. Destruction still
+    -- requires confirmed dead evidence through the heartbeat/provider paths.
+}
+
 
 rule ProviderInstanceDied {
     when: instance: Instance.provider_instance.status becomes exited
