@@ -43,12 +43,9 @@ func TorchMaxComputeCap(version, cudaVariant string) string {
 		}
 		return "9.0"
 	case maj == 2 && min == 6:
-		if cu == "cu128" {
-			return "12.0"
-		}
-		if cu == "cu126" {
-			return "10.0"
-		}
+		// The CUDA wheel variant names the bundled toolkit, not the highest
+		// architecture compiled into the wheel. Torch 2.6 wheels, including
+		// cu126 and cu128, contain kernels only through Hopper (sm_90).
 		return "9.0"
 	case maj == 2 && min >= 7:
 		if cu == "cu126" || cu == "cu128" {

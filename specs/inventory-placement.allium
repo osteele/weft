@@ -791,8 +791,9 @@ value Constraints {
                                 -- submit time (cmd/run.go
                                 -- resolveEffectiveGPUMemAndCeiling), before
                                 -- Constraints are built.
-    max_compute_cap: String?    -- upper bound on CUDA compute capability
-                                -- (e.g. "9.0", "12.0"); inferred from the
+    max_compute_cap: String?    -- upper bound on CUDA compute capability in
+                                -- canonical major.minor form (e.g. sm_90 is
+                                -- "9.0", sm_120 is "12.0"); inferred from the
                                 -- project's torch pin or an explicit
                                 -- [tool.weft] gpu-arch-max
     min_compute_cap: String?    -- lower bound on CUDA compute capability
@@ -1043,9 +1044,10 @@ rule EvaluateEligibility {
     --    unknown caps do not satisfy the bound: an all-unknown-cap target is
     --    ineligible. Non-CUDA GPU hosts do not need to satisfy this CUDA bound
     --    for jobs that did not request a GPU.
-    --    The bound is inferred from the project's pinned torch version + CUDA
-    --    wheel variant unless the user overrides it with [tool.weft]
-    --    gpu-arch-max.
+    --    The bound is inferred from the architectures actually compiled into
+    --    the pinned torch wheel. The wheel's CUDA toolkit variant is only a
+    --    lookup key: cu128 does not itself imply support for sm_120. An
+    --    explicit [tool.weft] gpu-arch-max overrides the inferred bound.
     if c.max_compute_cap != null:
         requires: target.devices.any(g =>
             ComputeCapForGPU(g.class) != null
@@ -1173,9 +1175,12 @@ rule EvaluateEligibility {
         -- placement.scoreHost and the CheckHostConstraints compatibility
         -- wrapper.
         -- Compute-cap inference: dataloc.ScanTorchPin reads uv.lock /
-        -- pyproject.toml, placement.TorchMaxComputeCap and TorchMinComputeCap
-        -- map (version, cu-variant) to caps, placement.MaxComputeCapForJob /
-        -- MinComputeCapForJob apply them. Cloud-offer arch filtering calls
+        -- pyproject.toml; dataloc.TorchMaxComputeCap and TorchMinComputeCap
+        -- map (version, cu-variant) to canonical major.minor caps. The CUDA
+        -- toolkit variant is not itself a compute capability: torch 2.6 cu128
+        -- still resolves to "9.0", not "12.0".
+        -- placement.MaxComputeCapForJob / MinComputeCapForJob apply the
+        -- derived caps. Cloud-offer arch filtering calls
         -- EvaluateEligibility(TargetSpecFromOffer). All target specs fail
         -- closed on max-cap unknowns. This matters for provider catalogs and
         -- on-prem inventory alike: an unrecognized GPU model may be newer

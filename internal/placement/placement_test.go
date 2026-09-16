@@ -2344,8 +2344,8 @@ wheels = [
 	if cpuTorch.MinComputeCap != "7.5" {
 		t.Fatalf("torch CPU job MinComputeCap = %q, want 7.5", cpuTorch.MinComputeCap)
 	}
-	if cpuTorch.MaxComputeCap != "12.0" {
-		t.Fatalf("torch CPU job MaxComputeCap = %q, want 12.0", cpuTorch.MaxComputeCap)
+	if cpuTorch.MaxComputeCap != "9.0" {
+		t.Fatalf("torch CPU job MaxComputeCap = %q, want 9.0", cpuTorch.MaxComputeCap)
 	}
 
 	// A non-torch project resolves no arch caps for a CPU job.
@@ -2364,7 +2364,7 @@ wheels = [
 			plain.MinComputeCap, plain.MaxComputeCap)
 	}
 
-	// A GPU job continues to resolve torch-derived caps and version floors.
+	// A GPU job resolves the fresh torch-derived cap over a stale persisted cap.
 	gpu := ConstraintsFromJob(&dbpkg.Job{
 		ID:            3,
 		WorkingDir:    torchDir,
@@ -2375,8 +2375,8 @@ wheels = [
 	if gpu.MinComputeCap == "" {
 		t.Fatal("GPU job min compute cap is empty, want torch-derived cap")
 	}
-	if gpu.MaxComputeCap != "12.0" {
-		t.Fatalf("GPU job max compute cap = %q, want 12.0", gpu.MaxComputeCap)
+	if gpu.MaxComputeCap != "9.0" {
+		t.Fatalf("GPU job max compute cap = %q, want 9.0", gpu.MaxComputeCap)
 	}
 	if len(gpu.VersionRequirements) == 0 {
 		t.Fatal("GPU job version requirements are empty, want CUDA/driver floors")
@@ -2490,13 +2490,13 @@ wheels = [
 		WorkingDir:    dir,
 		Command:       "uv run train.py",
 		GPUClass:      "nvidia",
-		MaxComputeCap: "9.0",
+		MaxComputeCap: "12.0",
 	})
-	if resolved.MaxComputeCapForPersistence != "12.0" {
-		t.Fatalf("MaxComputeCapForPersistence = %q, want fresh 12.0", resolved.MaxComputeCapForPersistence)
+	if resolved.MaxComputeCapForPersistence != "9.0" {
+		t.Fatalf("MaxComputeCapForPersistence = %q, want fresh 9.0", resolved.MaxComputeCapForPersistence)
 	}
-	if resolved.Constraints.MaxComputeCap != "12.0" {
-		t.Fatalf("Constraints.MaxComputeCap = %q, want fresh 12.0", resolved.Constraints.MaxComputeCap)
+	if resolved.Constraints.MaxComputeCap != "9.0" {
+		t.Fatalf("Constraints.MaxComputeCap = %q, want fresh 9.0", resolved.Constraints.MaxComputeCap)
 	}
 }
 

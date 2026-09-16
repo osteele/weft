@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/placement"
 )
 
 func TestCheapestOffer(t *testing.T) {
@@ -1658,16 +1659,11 @@ func TestFilterOffersByTorchArch(t *testing.T) {
 	}
 }
 
-// TestFilterOffersByTorchArch_RejectsBlackwellForTorch26 is the wj2365
-// regression on 2026-06-02: torch 2.6 maps to maxCap "9.0" and the job had
-// gpu-arch-max sm_9.0, but the autopilot launched onto RunPod RTX PRO 4500
-// Blackwell instances three times. Two failure modes stacked:
-//  1. the GPU catalog didn't list "rtxpro4500" / "rtxpro5000", and the
-//     generation-name fallback in ComputeCapForGPU needs the literal
-//     "blackwell" in the GPU name. RunPod's offer.GPUName is the terse
-//     displayName ("RTX PRO 4500"), so ComputeCapForGPU returned "".
-//  2. filterOffersByTorchArch was fail-open on maxCap-only when gpuCap == "",
-//     so an unknown card sailed through. Both are now closed.
+// TestFilterOffersByTorchArch_RejectsBlackwellForTorch26 covers wb141 at the
+// pre-rental offer boundary. The cap must come from the resolved torch pin,
+// rather than being hard-coded in the test, so an incorrect framework metadata
+// cap cannot admit Blackwell offers while the comparison logic still appears
+// correct.
 func TestFilterOffersByTorchArch_RejectsBlackwellForTorch26(t *testing.T) {
 	offers := []cloud.Offer{
 		{ProviderID: "rtxpro4500", GPUName: "RTX PRO 4500"},
@@ -1676,7 +1672,11 @@ func TestFilterOffersByTorchArch_RejectsBlackwellForTorch26(t *testing.T) {
 		{ProviderID: "a6000", GPUName: "RTX A6000"},
 		{ProviderID: "4000ada", GPUName: "RTX 4000 Ada"},
 	}
-	got, filtered, _, _ := filterOffersByTorchArch(offers, "", "9.0")
+	maxCap := placement.TorchMaxComputeCap("2.6.0", "cu128")
+	if maxCap != "9.0" {
+		t.Fatalf("torch 2.6 cu128 max cap = %q, want %q", maxCap, "9.0")
+	}
+	got, filtered, _, _ := filterOffersByTorchArch(offers, "", maxCap)
 	if filtered != 3 {
 		t.Errorf("filtered = %d, want 3 (RTX PRO 4500/5000/6000 WS all sm_12.0)", filtered)
 	}

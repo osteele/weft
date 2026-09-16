@@ -19,3 +19,12 @@ func TestResolveTorchMaxComputeCapForPersistence(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveTorchMaxComputeCapForPersistence_Torch26Cu128(t *testing.T) {
+	dir := t.TempDir()
+	WriteTestTorchPin(t, dir, "2.6.0", "cu128")
+
+	if got := ResolveTorchMaxComputeCapForPersistence("", dir); got != "9.0" {
+		t.Fatalf("resolved cap = %q, want canonical sm_90 cap %q", got, "9.0")
+	}
+}

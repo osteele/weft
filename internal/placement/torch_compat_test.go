@@ -28,10 +28,10 @@ func TestTorchMaxComputeCap(t *testing.T) {
 		{"2.5.0", "cu121", "9.0"},
 		{"2.5.1", "cu124", "9.0"},
 		{"2.5.1", "cu126", "10.0"},
-		// 2.6: sm_120 added on cu128
+		// 2.6 wheels remain Hopper-bound across CUDA toolkit variants.
 		{"2.6.0", "cu124", "9.0"},
-		{"2.6.0", "cu126", "10.0"},
-		{"2.6.0", "cu128", "12.0"},
+		{"2.6.0", "cu126", "9.0"},
+		{"2.6.0", "cu128", "9.0"},
 		// 2.7+
 		{"2.7.0", "cu126", "12.0"},
 		{"2.7.0", "cu128", "12.0"},
@@ -44,13 +44,50 @@ func TestTorchMaxComputeCap(t *testing.T) {
 		{"", "cu121", ""},
 		{"abc", "cu121", ""},
 		// Local-version suffix is stripped
-		{"2.6.0+cu128", "cu128", "12.0"},
+		{"2.6.0+cu128", "cu128", "9.0"},
 	}
 	for _, c := range cases {
 		got := TorchMaxComputeCap(c.version, c.cuda)
 		if got != c.want {
 			t.Errorf("TorchMaxComputeCap(%q, %q) = %q, want %q", c.version, c.cuda, got, c.want)
 		}
+	}
+}
+
+func TestTorch26Cu128ComputeCapBoundary(t *testing.T) {
+	cap := TorchMaxComputeCap("2.6.0", "cu128")
+	parsed, ok := parseComputeCap(cap)
+	if !ok || parsed != 9.0 {
+		t.Fatalf("parsed torch 2.6 cu128 cap = %v, %v; want canonical compute capability 9.0", parsed, ok)
+	}
+
+	tests := []struct {
+		name      string
+		gpu       string
+		deviceCap string
+		eligible  bool
+	}{
+		{name: "sm_90 boundary admitted", gpu: "H100", deviceCap: "9.0", eligible: true},
+		{name: "sm_120 rejected", gpu: "RTX PRO 5000", deviceCap: "12.0", eligible: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			device := TargetDeviceFromGPU("", tt.gpu, 0, 1, nil)
+			if device.ComputeCap != tt.deviceCap {
+				t.Fatalf("%s compute cap = %q, want %q", tt.gpu, device.ComputeCap, tt.deviceCap)
+			}
+			verdict := EvaluateEligibility(
+				Constraints{MaxComputeCap: cap},
+				TargetSpec{
+					Devices:                         []TargetDevice{device},
+					GPUInventoryKnown:               true,
+					MaxComputeCapUnknownFailsClosed: true,
+				},
+			)
+			if verdict.Eligible != tt.eligible {
+				t.Fatalf("eligibility = %v (%v), want %v", verdict.Eligible, verdict.Messages(), tt.eligible)
+			}
+		})
 	}
 }
 
