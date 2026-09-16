@@ -48,3 +48,31 @@ func TestWriteArtifactNeedSatisfiedMarkers_ProducerNeed(t *testing.T) {
 		}
 	}
 }
+
+// R2-pull reconciliation can publish the same add more than once before the
+// controller observes runner state. The attempt identity must remain one queue
+// item so staging retries cannot execute the consumer twice.
+func TestProducerNeedDuplicateDispatchQueuesOneAttempt(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	job := &opsqueue.CommandJob{
+		ID: 9001, RunID: 7001, Dir: "/tmp/consumer", Cmd: "cat outputs/result.tar",
+		Needs: []string{"outputs/result.tar:8144"},
+		ArtifactNeeds: []opsqueue.ArtifactNeed{{
+			Spec: "outputs/result.tar:8144", Path: "outputs/result.tar",
+			R2Key: "jobs/8144/runs/7000/outputs/outputs/result.tar",
+		}},
+	}
+	for _, timestamp := range []string{"2026-09-16T00:00:00Z", "2026-09-16T00:00:01Z"} {
+		appendCmd(t, cmdFile, opsqueue.QueueCommand{Timestamp: timestamp, Op: opsqueue.OpAdd, Job: job})
+	}
+
+	state := NewState()
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatalf("ProcessCommands: %v", err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0] != job.ID {
+		t.Fatalf("duplicate attempt queued as %v, want one pending job %d", state.Pending, job.ID)
+	}
+}

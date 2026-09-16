@@ -103,7 +103,7 @@ func recordR2NeedsConsumer(t *testing.T, database *sql.DB, needs []string) *db.J
 	return job
 }
 
-func recordNeedProducer(t *testing.T, database *sql.DB, host string) (string, string) {
+func recordNeedProducerWithoutPublication(t *testing.T, database *sql.DB, host string) (string, string, int64) {
 	t.Helper()
 	id, err := db.RecordQueued(database, host, "/tmp/producer", "produce", "producer")
 	if err != nil {
@@ -125,7 +125,36 @@ func recordNeedProducer(t *testing.T, database *sql.DB, host string) (string, st
 	if err != nil || producer.LatestRunID == nil {
 		t.Fatalf("producer attempt: %+v, %v", producer, err)
 	}
-	return fmt.Sprintf("outputs/result.bin:%d", id), fmt.Sprintf("jobs/%d/runs/%d/outputs/outputs/result.bin", id, *producer.LatestRunID)
+	runID := *producer.LatestRunID
+	return fmt.Sprintf("outputs/result.bin:%d", id), fmt.Sprintf("jobs/%d/runs/%d/outputs/outputs/result.bin", id, runID), runID
+}
+
+func publishNeedProducer(t *testing.T, database *sql.DB, spec, key string, runID int64) {
+	t.Helper()
+	var jobID int64
+	if _, err := fmt.Sscanf(spec, "outputs/result.bin:%d", &jobID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	if _, err := db.UpsertAttemptPublicationState(database, &db.AttemptPublicationState{
+		AttemptID: runID, JobID: jobID, Sequence: 1, ObservedAt: now,
+		ExecutionState: db.PublicationExecutionComplete, ExecutionCompletedAt: &now,
+		RequiredArtifactsState: db.PublicationStateReady, RequiredArtifactsReadyAt: &now,
+		DrainState: db.PublicationStateReady, DrainCompletedAt: &now,
+		Artifacts: []db.AttemptPublicationArtifact{{
+			Name: "result", Path: "outputs/result.bin", State: db.PublicationStateReady,
+			ReadyAt: &now, PayloadKey: key,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func recordNeedProducer(t *testing.T, database *sql.DB, host string) (string, string) {
+	t.Helper()
+	spec, key, runID := recordNeedProducerWithoutPublication(t, database, host)
+	publishNeedProducer(t, database, spec, key, runID)
+	return spec, key
 }
 
 func r2QueueAdds(t *testing.T, store *fakeInventoryQueueStore) []opsqueue.CommandJob {
@@ -160,9 +189,6 @@ func TestR2QueueArtifactNeeds(t *testing.T) {
 				spec, key := recordNeedProducer(t, database, host)
 				specs = append(specs, spec)
 				want = append(want, opsqueue.ArtifactNeed{Spec: spec, Path: "outputs/result.bin", R2Key: key})
-				r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, candidate string) (bool, error) {
-					return candidate == key, nil
-				}
 			}
 			if kind == "named" || kind == "mixed" {
 				if err := db.UpsertNamedAsset(database, db.NamedAsset{Name: "trace", ContentHash: "trace-hash", ContentType: "directory", TargetPath: "data/trace"}); err != nil {
@@ -199,11 +225,7 @@ func TestR2QueueNeedsRequireCapability(t *testing.T) {
 			publishState(nil)
 			spec := "asset:trace"
 			if kind == "producer" {
-				var key string
-				spec, key = recordNeedProducer(t, database, "")
-				r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, candidate string) (bool, error) {
-					return candidate == key, nil
-				}
+				spec, _ = recordNeedProducer(t, database, "")
 			} else if err := db.UpsertNamedAsset(database, db.NamedAsset{Name: "trace", ContentHash: "hash", ContentType: "file", TargetPath: "data/trace"}); err != nil {
 				t.Fatal(err)
 			}
@@ -216,6 +238,26 @@ func TestR2QueueNeedsRequireCapability(t *testing.T) {
 				t.Fatalf("incapable runner received jobs: %+v", adds)
 			}
 		})
+	}
+}
+
+func TestR2QueueProducerNeedRejectsMismatchedAttemptKey(t *testing.T) {
+	database, store, _ := setupR2QueueNeeds(t)
+	spec, _, runID := recordNeedProducerWithoutPublication(t, database, "")
+	var producerID int64
+	if _, err := fmt.Sscanf(spec, "outputs/result.bin:%d", &producerID); err != nil {
+		t.Fatal(err)
+	}
+	staleKey := fmt.Sprintf("jobs/%d/runs/%d/outputs/outputs/result.bin", producerID, runID+1)
+	publishNeedProducer(t, database, spec, staleKey, runID)
+	job := recordR2NeedsConsumer(t, database, []string{spec})
+
+	err := AppendJobToQueue(database, job, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "mismatched payload key") {
+		t.Fatalf("want attempt-provenance refusal, got %v", err)
+	}
+	if adds := r2QueueAdds(t, store); len(adds) != 0 {
+		t.Fatalf("mismatched attempt published queue entries: %+v", adds)
 	}
 }
 
@@ -241,16 +283,12 @@ func TestR2QueueNeedsLazyClient(t *testing.T) {
 	}
 }
 
-func TestR2QueueProducerDispatchRetriesMissingArtifact(t *testing.T) {
+func TestR2QueueProducerDispatchWaitsForAttemptPublication(t *testing.T) {
 	for _, route := range []string{"host-sync", "reconcile"} {
 		t.Run(route, func(t *testing.T) {
 			database, store, _ := setupR2QueueNeeds(t)
-			spec, key := recordNeedProducer(t, database, "")
+			spec, key, runID := recordNeedProducerWithoutPublication(t, database, "")
 			job := recordR2NeedsConsumer(t, database, []string{spec})
-			uploaded := false
-			r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, candidate string) (bool, error) {
-				return uploaded && candidate == key, nil
-			}
 			// Source transfer is independent of artifact resolution.
 			oldSource := queueSourceSync
 			t.Cleanup(func() { queueSourceSync = oldSource })
@@ -262,16 +300,14 @@ func TestR2QueueProducerDispatchRetriesMissingArtifact(t *testing.T) {
 				_, _, err := ensureQueuedJobsOnRemote(database, job.Host, time.Second, time.Second, slog.Default())
 				return err
 			}
+
 			err := dispatch()
-			if err == nil || !strings.Contains(err.Error(), "not in R2 yet") ||
+			if err == nil || !strings.Contains(err.Error(), "publication unavailable") ||
 				!strings.Contains(err.Error(), "outputs/result.bin") || !strings.Contains(err.Error(), "wj1") {
-				t.Fatalf("want producer-specific retryable missing-artifact error, got %v", err)
-			}
-			if route == "reconcile" && !errors.Is(err, r2resolve.ErrArtifactMissing) {
-				t.Fatalf("missing-artifact cause lost: %v", err)
+				t.Fatalf("want producer-specific unavailable-publication error, got %v", err)
 			}
 			if adds := r2QueueAdds(t, store); len(adds) != 0 {
-				t.Fatalf("missing artifact published a queue entry: %+v", adds)
+				t.Fatalf("unpublished artifact published a queue entry: %+v", adds)
 			}
 			pending, err := db.GetJobByID(database, job.ID)
 			if err != nil {
@@ -279,7 +315,7 @@ func TestR2QueueProducerDispatchRetriesMissingArtifact(t *testing.T) {
 			}
 			if pending.Status != db.StatusQueued || pending.LastSyncedStatus != "" ||
 				pending.FailureReason != "" || pending.ErrorMessage != "" || pending.ExitCode != nil || pending.EndTime != nil {
-				t.Fatalf("missing artifact became terminal or dispatched: %+v", pending)
+				t.Fatalf("unavailable publication became terminal or dispatched: %+v", pending)
 			}
 			if route == "host-sync" {
 				var failures int
@@ -290,13 +326,14 @@ func TestR2QueueProducerDispatchRetriesMissingArtifact(t *testing.T) {
 					t.Fatalf("dispatch failures = %d, want one retry/backoff anchor", failures)
 				}
 			}
-			uploaded = true
+
+			publishNeedProducer(t, database, spec, key, runID)
 			if err := dispatch(); err != nil {
-				t.Fatalf("retry after upload: %v", err)
+				t.Fatalf("dispatch after attempt publication: %v", err)
 			}
 			adds := r2QueueAdds(t, store)
 			if len(adds) != 1 || len(adds[0].ArtifactNeeds) != 1 || adds[0].ArtifactNeeds[0].R2Key != key {
-				t.Fatalf("retry did not publish resolved producer key: %+v", adds)
+				t.Fatalf("published producer attempt did not dispatch exact key: %+v", adds)
 			}
 		})
 	}

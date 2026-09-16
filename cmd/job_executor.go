@@ -483,9 +483,11 @@ func resolveArtifactNeedsPlacement(database *sql.DB, needs []string, host string
 			return "", nil, err
 		}
 
-		// On-prem producer: pin the consumer to the producer's host so the
-		// shared filesystem / queue-runner dep chain handles artifact reuse.
-		// Rental and unplaced producers are classified later at launch time.
+		// On-prem producer: pin the consumer to the producer's host. SSH queue
+		// runners reuse the shared filesystem and producer marker; R2-pull
+		// runners resolve the completed attempt's publication into a staged
+		// ArtifactNeed at dispatch. Rental and unplaced producers are
+		// classified later at launch time.
 		if !job.IsRentalJob() && strings.TrimSpace(job.Host) != "" {
 			producerHost := strings.TrimSpace(job.Host)
 			if !seenJobs[parsed.Version] {

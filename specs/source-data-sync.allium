@@ -1517,6 +1517,61 @@ rule OnPremStagingFromR2 {
         -- simultaneous half-finished uploads that stomped each other.
 }
 
+-- R2-pull inventory hosts cannot rely on a shared source tree or on the
+-- producer runner's local satisfied marker. Their queue entry therefore
+-- carries the producer artifact as a structured ArtifactNeed, exactly as a
+-- rental manifest carries a CloudNeed. Resolution is attempt-scoped: bytes
+-- left by an older run of the logical producer job are not admissible evidence.
+rule R2PullInventoryProducerNeedStaging {
+    when: InventoryQueuePublicationRequested(job, host)
+    requires: host.target_kind = inventory_host
+    requires: host.queue_transport = r2_pull
+
+    for need in job.needs where IsProducerArtifactSpec(need):
+        let producer = ResolveProducerJob(need)
+        let attempt = AuthoritativeAttempt(producer)
+        let publication = AttemptPublicationState(attempt.id)
+
+        ensures:
+            QueueEntryPublished(job) implies producer.status = completed
+            QueueEntryPublished(job) implies publication.attempt_id = attempt.id
+            QueueEntryPublished(job) implies (
+                ArtifactPublicationReady(publication, need.path)
+                or RequiredArtifactPublicationReady(publication)
+            )
+            QueueEntryPublished(job) implies
+                ArtifactNeedR2Key(job, need) starts_with JobAttemptR2Prefix(
+                    producer.id, attempt.id)
+            QueueEntryPublished(job) implies QueueArtifactNeedRecorded(
+                job: job,
+                spec: need,
+                path: need.path,
+                r2_key: ArtifactNeedR2Key(job, need)
+            )
+            JobSetupStarts(job) only_after ArtifactBytesPresentOnHost(
+                host, RuntimeWorkingDir(job) / need.path)
+            AttemptPublicationEvidenceUnavailable(attempt, need.path)
+                implies not QueueEntryPublished(job)
+            DuplicateQueuePublication(job.id, job.latest_run_id)
+                implies CountJobExecutions(job.id, job.latest_run_id) = 1
+
+    -- legacy annotation: @guidance
+        -- Implementation anchors:
+        --   internal/ops/host_sync.go resolveR2QueueNeeds and
+        --     resolvePublishedProducerNeed — require the completed
+        --     authoritative attempt, consume attempt_publication_state, and
+        --     reject mismatched or historical R2 keys before queue publication
+        --   internal/ops/queue.go — carries the resolved ArtifactNeed in the
+        --     R2 inbox add command and gates producer support by runner version
+        --   internal/runner/runner.go — stages the exact R2 key after source
+        --     materialization and before setup or command execution
+        --   internal/runner/commands.go — duplicate adds for the same job/run
+        --     merge into one pending or live attempt
+        -- Missing or pending publication evidence is a structured controller
+        -- dispatch refusal. The job is never admitted to an agent-side
+        -- preflight loop while its producer artifact is unavailable.
+}
+
 -- Named assets extend OnPremStagingFromR2 to non-producer-job sources:
 -- the bytes were published via `weft data publish` rather than produced by
 -- a rental job, so there is no producer JobAttempt to resolve. The chain is:
