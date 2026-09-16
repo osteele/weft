@@ -222,6 +222,11 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 		job.SessionName = ""
 		writerOwnershipRecovered = true
 	}
+	if writerOwnershipRecovered {
+		if err := clearQueueOutcomeUnknown(database, job); err != nil {
+			return SyncResult{}, err
+		}
+	}
 	if job != nil && job.UsesQueueRunner() && hostUsesR2Queue(job.Host) {
 		updated, err := BatchSyncQueueRunnerJobs(database, job.Host, []*db.Job{job}, opts.Timeout)
 		if err != nil {
@@ -285,6 +290,14 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 	}
 	// Successfully contacted host via SSH
 	result.HostContacted = true
+	if exists {
+		if err := clearQueueOutcomeUnknown(database, job); err != nil {
+			return SyncResult{}, err
+		}
+		if refreshed, refreshErr := db.GetJobByID(database, job.ID); refreshErr == nil && refreshed != nil {
+			job.Metadata = refreshed.Metadata
+		}
+	}
 
 	if exists {
 		paused := queueRemoteClient.ProcessPaused(job.Host, job.ID, timeout)
@@ -361,8 +374,23 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 	if writerEvidence == exactQueueWriterUnknown {
 		// Missing tmux and status files are not proof of exit while the fresh
 		// runner observation needed to disambiguate a start-now handoff is
-		// unavailable. Preserve the open attempt for a later authoritative
-		// runner state or completion.
+		// unavailable. Preserve the open attempt — and any pending start intent
+		// that must not launch a duplicate writer — only for a bounded window:
+		// once repeated unknown evidence ages past the queue outcome unknown
+		// bound, route through the shared unresolved-outcome machinery so an
+		// unreachable inventory cannot preserve the attempt forever.
+		becameUnresolved, observeErr := observeQueueOutcomeUnresolved(database, job, syncNow(opts.Now), effectiveQueueUnknownAfter(opts.QueueUnknownAfter))
+		if observeErr != nil {
+			return SyncResult{HostContacted: true}, observeErr
+		}
+		if becameUnresolved {
+			if refreshed, refreshErr := db.GetJobByID(database, job.ID); refreshErr == nil && refreshed != nil {
+				job.Metadata = refreshed.Metadata
+			}
+		}
+		if becameUnresolved {
+			return SyncResult{Updated: true, HostContacted: true}, nil
+		}
 		return SyncResult{HostContacted: true}, nil
 	}
 

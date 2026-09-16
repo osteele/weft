@@ -537,3 +537,222 @@ func TestApplyBatchStatusesIgnoresUnresolvedObservationForOldAttempt(t *testing.
 		t.Fatalf("stale observation wrote reconciliation metadata: %+v", current.Metadata.Reconciliation)
 	}
 }
+
+// Unknown exact-writer evidence (an unavailable or stale R2 runner snapshot)
+// preserves the session-named attempt only for a bounded window: within the
+// queue outcome unknown bound the open attempt and any pending start intent
+// are untouched, and past the bound the attempt becomes unresolved through
+// the shared bounded-outcome machinery instead of being preserved forever.
+func TestSyncJobBoundsUnknownExactQueueWriterEvidence(t *testing.T) {
+	originalLoad := loadQueueConfig
+	originalWriterFetch := fetchR2RunnerStateForWriter
+	originalTmuxProbe, originalStatusRead := tmuxSessionExistsForSync, readStatusFileForSync
+	t.Cleanup(func() {
+		loadQueueConfig = originalLoad
+		fetchR2RunnerStateForWriter = originalWriterFetch
+		tmuxSessionExistsForSync, readStatusFileForSync = originalTmuxProbe, originalStatusRead
+	})
+	loadQueueConfig = func() (*config.Config, error) {
+		return &config.Config{Hosts: map[string]config.HostConfig{
+			"studio": {QueueTransport: queueTransportR2Pull},
+		}}, nil
+	}
+	tmuxSessionExistsForSync = func(string, string, time.Duration) (bool, error) { return false, nil }
+	readStatusFileForSync = func(string, string, time.Duration) (*StatusFileResult, error) { return nil, nil }
+	fetchR2RunnerStateForWriter = func(string) (*opsqueue.RunnerState, error) {
+		return nil, fmt.Errorf("runner observation unavailable")
+	}
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "true", "unknown writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateQueuedToRunningWithSession(database, jobID, "rj-unknown-writer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetPendingStatus(database, jobID, db.StatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job.LatestRunID == nil {
+		t.Fatalf("load active attempt: job=%+v err=%v", job, err)
+	}
+	runID := *job.LatestRunID
+
+	t0 := time.Unix(2_000_000, 0)
+	bound := time.Minute
+	opts := func(now time.Time) SyncOptions {
+		return SyncOptions{SkipSamples: true, QueueUnknownAfter: bound, Now: func() time.Time { return now }}
+	}
+
+	result, err := SyncJob(database, job, opts(t0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Updated {
+		t.Fatal("first unknown observation closed the bounded window")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusRunning || job.SessionName != "rj-unknown-writer" ||
+		job.EndTime != nil || job.ExitCode != nil {
+		t.Fatalf("unknown evidence inside the bound changed the open attempt: %+v", job)
+	}
+	if job.PendingStatus == nil || *job.PendingStatus != db.StatusRunning {
+		t.Fatalf("pending start intent was not preserved inside the bound: %v", job.PendingStatus)
+	}
+	if job.Metadata == nil || job.Metadata.Reconciliation == nil ||
+		job.Metadata.Reconciliation.StatusUnknownSince != t0.Unix() {
+		t.Fatalf("unknown evidence was not anchored at %d: %+v", t0.Unix(), job.Metadata)
+	}
+
+	// Positive SSH evidence clears the unknown-absence anchor; a later unknown
+	// observation starts a fresh bounded window instead of inheriting t0.
+	tmuxSessionExistsForSync = func(string, string, time.Duration) (bool, error) { return true, nil }
+	result, err = SyncJob(database, job, opts(t0.Add(time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Updated {
+		t.Fatal("positive tmux evidence unexpectedly changed the running job")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Metadata != nil && job.Metadata.Reconciliation != nil &&
+		job.Metadata.Reconciliation.StatusUnknownSince != 0 {
+		t.Fatalf("positive evidence kept unknown anchor: %+v", job.Metadata)
+	}
+
+	tmuxSessionExistsForSync = func(string, string, time.Duration) (bool, error) { return false, nil }
+	result, err = SyncJob(database, job, opts(t0.Add(bound+time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Updated {
+		t.Fatal("first unknown after positive evidence reused the cleared window")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusRunning || job.EndTime != nil || job.ExitCode != nil {
+		t.Fatalf("restarted unknown window changed the open attempt: %+v", job)
+	}
+	if job.Metadata == nil || job.Metadata.Reconciliation == nil ||
+		job.Metadata.Reconciliation.StatusUnknownSince != t0.Add(bound+time.Second).Unix() {
+		t.Fatalf("unknown evidence did not restart the window: %+v", job.Metadata)
+	}
+	result, err = SyncJob(database, job, opts(t0.Add(2*bound+3*time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Updated {
+		t.Fatal("unknown evidence past the restarted bound did not route to the unresolved outcome")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusUnresolved || job.EndTime != nil || job.ExitCode != nil ||
+		job.LatestRunID == nil || *job.LatestRunID != runID {
+		t.Fatalf("bounded unknown evidence did not become unresolved on the same attempt: %+v", job)
+	}
+}
+
+// Unknown exact-writer evidence must hold every pending intent, not only a
+// pending start: a kill, cancel, or pause intent cannot be applied from the
+// tentative tmux handoff while the runner snapshot that disambiguates writer
+// ownership is unavailable, so reconciliation is a retryable no-op that keeps
+// the durable intent for a later pass.
+func TestSyncAndReconcileUnknownWriterEvidencePreservesPendingIntents(t *testing.T) {
+	for _, pending := range []string{db.StatusKilled, db.StatusCanceled, db.StatusPaused} {
+		t.Run(pending, func(t *testing.T) {
+			originalLoad := loadQueueConfig
+			originalWriterFetch := fetchR2RunnerStateForWriter
+			t.Cleanup(func() {
+				loadQueueConfig = originalLoad
+				fetchR2RunnerStateForWriter = originalWriterFetch
+			})
+			loadQueueConfig = func() (*config.Config, error) {
+				return &config.Config{Hosts: map[string]config.HostConfig{
+					"studio": {QueueTransport: queueTransportR2Pull},
+				}}, nil
+			}
+			fetchR2RunnerStateForWriter = func(string) (*opsqueue.RunnerState, error) {
+				return nil, fmt.Errorf("runner observation unavailable")
+			}
+
+			database := db.SetupTestDB(t)
+			jobID, err := db.RecordQueued(database, "studio", "/tmp", "true", "pending "+pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpdateQueuedToRunningWithSession(database, jobID, "rj-pending-intent"); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SetPendingStatus(database, jobID, pending); err != nil {
+				t.Fatal(err)
+			}
+			meta := &db.JobMetadata{Source: &db.JobSourceMetadata{Execution: &db.JobSourceExecutionMetadata{
+				DispatchMode: "pinned_inventory_manifest",
+			}}}
+			if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+				t.Fatal(err)
+			}
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			t0 := time.Unix(3_000_000, 0)
+			opts := func(now time.Time) ReconcileOptions {
+				return ReconcileOptions{Timeout: time.Second, QueueUnknownAfter: time.Minute, Now: func() time.Time { return now }}
+			}
+			result, err := SyncAndReconcile(database, job, opts(t0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result == nil || result.Action != "none" {
+				t.Fatalf("unknown writer evidence action = %+v, want retryable no-op", result)
+			}
+			reloaded, err := db.GetJobByID(database, jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.Status != db.StatusRunning || reloaded.EndTime != nil || reloaded.ExitCode != nil {
+				t.Fatalf("unknown evidence changed job status: %+v", reloaded)
+			}
+			if reloaded.PendingStatus == nil || *reloaded.PendingStatus != pending {
+				t.Fatalf("pending %s intent was not preserved: %v", pending, reloaded.PendingStatus)
+			}
+			result, err = SyncAndReconcile(database, reloaded, opts(t0.Add(time.Minute)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result == nil || result.Action != "none" {
+				t.Fatalf("terminal unknown evidence action = %+v, want retryable no-op", result)
+			}
+			reloaded, err = db.GetJobByID(database, jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.Status != db.StatusRunning || reloaded.EndTime != nil || reloaded.ExitCode != nil {
+				t.Fatalf("terminal intent took an uncommittable unresolved transition: %+v", reloaded)
+			}
+			if reloaded.PendingStatus == nil || *reloaded.PendingStatus != pending {
+				t.Fatalf("terminal intent was not preserved for recovery: %v", reloaded.PendingStatus)
+			}
+		})
+	}
+}

@@ -708,11 +708,26 @@ func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*Re
 	remoteStatus := ""
 	var err error
 	writerEvidence := observeExactQueueWriter(job)
-	if writerEvidence == exactQueueWriterUnknown &&
-		job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning {
-		// The start-now handoff cannot safely launch a second writer until a
-		// fresh runner snapshot says whether the exact attempt is already
-		// owned. Keep the durable intent pending and retry observation later.
+	if writerEvidence == exactQueueWriterUnknown && job.PendingStatus != nil {
+		// A start could launch a second writer, and a terminal or pause intent
+		// could accept a false remote status read from the tentative tmux
+		// handoff. Keep the durable intent pending through the bounded
+		// observation window. Past it, preserve the open attempt as unresolved
+		// only when the intent remains reachable from unresolved; terminal
+		// intents stay retryable because no Unresolved -> killed/canceled
+		// transition exists.
+		pendingStart := *job.PendingStatus == db.StatusRunning
+		becameUnresolved := false
+		var observeErr error
+		if pendingStart {
+			becameUnresolved, observeErr = observeQueueOutcomeUnresolved(database, job, syncNow(opts.Now), effectiveQueueUnknownAfter(opts.QueueUnknownAfter))
+			if observeErr != nil {
+				return nil, observeErr
+			}
+		}
+		if becameUnresolved {
+			return &ReconcileResult{Action: "update_db", OldStatus: oldStatus, NewStatus: db.StatusUnresolved, Resolution: queueOutcomeUnresolvedReason}, nil
+		}
 		return &ReconcileResult{Action: "none", Resolution: "queue writer observation unknown"}, nil
 	}
 	if writerEvidence == exactQueueWriterActive {
@@ -725,6 +740,9 @@ func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*Re
 	if writerEvidence == exactQueueWriterActive {
 		// The attempt-fenced queue writer wins ownership over the tentative
 		// tmux handoff. Reconcile against that positive running observation.
+		if err := clearQueueOutcomeUnknown(database, job); err != nil {
+			return nil, err
+		}
 	} else if job.UsesSlurm() {
 		info, probeErr := probeSlurmInfo(job, opts.Timeout)
 		if probeErr != nil {

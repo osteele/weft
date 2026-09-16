@@ -297,11 +297,27 @@ rule ActiveExactQueueWriterOwnsStartHandoff {
     ensures: AttemptSourceProvenancePreserved(job.latest_attempt)
 
     -- A stale, missing, malformed, or unfenced runner observation cannot
-    -- decide ownership. Preserve both the open attempt and pending start intent
-    -- until a fresh exact writer or authoritative completion is observed.
+    -- decide ownership. Unknown evidence is bounded by the same
+    -- queue_outcome_unknown_bound as confirmed absence: within the bound the
+    -- open attempt and every pending intent are preserved (a start must not
+    -- launch a duplicate writer; a terminal intent must not accept a false
+    -- terminal status). Past it, a pending start becomes unresolved through
+    -- the shared bounded-outcome machinery; terminal intents remain preserved
+    -- and retryable because unresolved has no killed/canceled/dead transition.
     if ExactQueueWriterObservation(job.latest_attempt) = unknown:
-        ensures: JobStatusPreserved(job)
-        ensures: PendingStartIntentPreserved(job.latest_attempt)
+        if QueueAbsenceAge(job.latest_attempt) < queue_outcome_unknown_bound:
+            ensures: JobStatusPreserved(job)
+            ensures: PendingIntentPreserved(job.latest_attempt)
+            ensures: not DuplicateAttemptWriterStarted(job.latest_attempt)
+        else:
+            ensures: PendingIntentPreserved(job.latest_attempt)
+            if job.latest_attempt.pending_status = running:
+                ensures: job.status = unresolved
+                ensures: job.latest_attempt.exit_code = null
+                ensures: job.latest_attempt.end_time = null
+                ensures: JobDoesNotConsumePlacementCapacity(job)
+            else:
+                ensures: JobStatusPreserved(job)
 
     if AuthoritativeCompletionObserved(job.latest_attempt, exit_code):
         if exit_code = 0:
