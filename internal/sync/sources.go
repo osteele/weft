@@ -106,14 +106,17 @@ func DefaultExcludes() []string {
 }
 
 // gitignoreFilters returns rsync --filter directives that make rsync respect
-// git exclusion rules (.gitignore, .git/info/exclude, global gitignore).
+// git exclusion rules (.gitignore, .git/info/exclude, global gitignore) plus
+// weft's own .weftignore.
 // The returned slice contains interleaved flag/value pairs ready to append
 // to an rsync args slice.
 func gitignoreFilters(localDir string) []string {
 	var filters []string
 
-	// Per-directory .gitignore files (dir-merge rule: applied in each subdirectory)
+	// Per-directory .gitignore and .weftignore files (dir-merge rule: applied
+	// in each subdirectory)
 	filters = append(filters, "--filter", ":- .gitignore")
+	filters = append(filters, "--filter", ":- .weftignore")
 
 	// Repo-level .git/info/exclude (only if .git/ exists)
 	excludeFile := filepath.Join(localDir, ".git", "info", "exclude")
@@ -230,14 +233,33 @@ func sourceExcludes(localDir string) []string {
 			excludes = append(excludes, pattern)
 		}
 	}
+	for _, pattern := range parseWeftignorePatterns(localDir) {
+		if !slices.Contains(excludes, pattern) {
+			excludes = append(excludes, pattern)
+		}
+	}
 	return excludes
 }
 
 // parseGitignorePatterns reads the .gitignore file in localDir and returns
 // patterns compatible with shouldExclude (basename glob patterns).
-// Negation patterns, path-based patterns, and comments are skipped.
 func parseGitignorePatterns(localDir string) []string {
-	data, err := os.ReadFile(filepath.Join(localDir, ".gitignore"))
+	return parseIgnoreFilePatterns(localDir, ".gitignore")
+}
+
+// parseWeftignorePatterns reads the .weftignore file in localDir. It is the
+// weft-only counterpart to .gitignore: a tree that must ship to git but not to
+// a job (a large fixture corpus, a checked-in model) is excluded here without
+// changing what git tracks.
+func parseWeftignorePatterns(localDir string) []string {
+	return parseIgnoreFilePatterns(localDir, ".weftignore")
+}
+
+// parseIgnoreFilePatterns reads an ignore file in localDir and returns
+// patterns compatible with shouldExclude (basename glob patterns).
+// Negation patterns, path-based patterns, and comments are skipped.
+func parseIgnoreFilePatterns(localDir, name string) []string {
+	data, err := os.ReadFile(filepath.Join(localDir, name))
 	if err != nil {
 		return nil
 	}

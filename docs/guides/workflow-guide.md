@@ -49,9 +49,13 @@ Three consequences worth internalizing:
   Inventory dispatch still uses its rsync path; the stored cloud pin does not
   change on-prem source synchronization.
 
-The sync respects `.gitignore` (and `.weft.toml` `[sync] exclude_dirs`):
-ignored paths such as `cache/`, `build/`, `__pycache__/`, and `.venv/` are
-excluded from the tarball. On the remote host, extraction is additive —
+The sync respects `.gitignore`, `.weftignore`, and `.weft.toml`
+`[sync] exclude_dirs`: ignored paths such as `cache/`, `build/`,
+`__pycache__/`, and `.venv/` are excluded from the tarball. Use `.weftignore`
+for trees that must stay in version control but should not ship to a job — a
+checked-in fixture corpus, a model file, a local database. It takes the same
+basename patterns as `.gitignore` (a leading `!` negation or a pattern
+containing `/` is skipped). On the remote host, extraction is additive —
 files already present that are not in the tarball are left untouched, so
 `.gitignore`'d caches written by prior jobs persist across syncs.
 
