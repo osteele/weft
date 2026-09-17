@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // ExtractTarball extracts a gzip-compressed tarball into destDir.
@@ -28,10 +29,15 @@ func ExtractTarballReader(r io.Reader, destDir string) error {
 	defer gr.Close()
 
 	tr := tar.NewReader(gr)
+	// Directory modes are applied after the whole stream is written. A tar
+	// entry may carry a mode without the owner write or search bits; creating
+	// the directory with that mode first makes every later child under it
+	// fail with permission denied. Extract writable, harden afterwards.
+	dirModes := map[string]os.FileMode{}
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return nil
+			return applyDirModes(dirModes)
 		}
 		if err != nil {
 			return fmt.Errorf("read tar header: %w", err)
@@ -42,11 +48,12 @@ func ExtractTarballReader(r io.Reader, destDir string) error {
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)); err != nil {
+			if err := os.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("create directory %s: %w", target, err)
 			}
+			dirModes[target] = os.FileMode(hdr.Mode).Perm()
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("create parent directory for %s: %w", target, err)
 			}
 			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode))
@@ -64,7 +71,7 @@ func ExtractTarballReader(r io.Reader, destDir string) error {
 			if err := checkSymlinkWithinRoot(hdr.Name, hdr.Linkname); err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("create parent directory for %s: %w", target, err)
 			}
 			// Remove any existing entry so re-extraction over a previous
@@ -77,6 +84,26 @@ func ExtractTarballReader(r io.Reader, destDir string) error {
 			}
 		}
 	}
+}
+
+// applyDirModes restores archived directory permissions after the subtree
+// exists, deepest first so a hardened parent cannot block its own children.
+func applyDirModes(modes map[string]os.FileMode) error {
+	paths := make([]string, 0, len(modes))
+	for path := range modes {
+		paths = append(paths, path)
+	}
+	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+	for _, path := range paths {
+		mode := modes[path]
+		if mode == 0 {
+			continue
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			return fmt.Errorf("set directory mode %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // safeExtractTarget validates a tar entry name against tar-slip attacks and
