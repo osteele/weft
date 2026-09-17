@@ -62,11 +62,12 @@ func TestTarballRoundTripPreservesSymlink(t *testing.T) {
 	}
 }
 
-// A tar entry whose directory mode lacks the owner write bit must not block
-// its own children: extraction writes the subtree first and applies the
-// archived mode afterwards. Regression for wb145, where a 0500 parent made
-// every nested directory fail with permission denied before the worker ran.
-func TestExtractTarballAppliesRestrictiveDirModeAfterChildren(t *testing.T) {
+// An extracted snapshot is a working tree: archived modes that deny the owner
+// write or search access must not survive extraction, and a restrictive parent
+// must not block its own children. Regression for wb145 (nested directory
+// creation denied) and wb146 (the worker could not create .agent-execution
+// inside the extracted project root).
+func TestExtractTarballKeepsExtractedTreeOwnerWritable(t *testing.T) {
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
@@ -77,8 +78,9 @@ func TestExtractTarballAppliesRestrictiveDirModeAfterChildren(t *testing.T) {
 		body     string
 	}{
 		{"docs", tar.TypeDir, 0o500, ""},
-		{"docs/decisions", tar.TypeDir, 0o755, ""},
-		{"docs/decisions/0001.md", tar.TypeReg, 0o644, "record"},
+		{"docs/decisions", tar.TypeDir, 0o500, ""},
+		{"docs/decisions/0001.md", tar.TypeReg, 0o400, "record"},
+		{"run.sh", tar.TypeReg, 0o500, "echo hi"},
 	}
 	for _, entry := range entries {
 		hdr := &tar.Header{Name: entry.name, Typeflag: entry.typeflag, Mode: entry.mode, Size: int64(len(entry.body))}
@@ -102,24 +104,44 @@ func TestExtractTarballAppliesRestrictiveDirModeAfterChildren(t *testing.T) {
 	if err := ExtractTarballReader(bytes.NewReader(buf.Bytes()), destDir); err != nil {
 		t.Fatalf("ExtractTarballReader: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(destDir, "docs"), 0o755) })
 
-	info, err := os.Stat(filepath.Join(destDir, "docs"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o500 {
-		t.Errorf("docs mode = %o, want 500", got)
-	}
-	if err := os.Chmod(filepath.Join(destDir, "docs"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	body, err := os.ReadFile(filepath.Join(destDir, "docs", "decisions", "0001.md"))
 	if err != nil {
-		t.Fatalf("nested file was not extracted under a read-only parent: %v", err)
+		t.Fatalf("nested file was not extracted under a restrictive parent: %v", err)
 	}
 	if string(body) != "record" {
 		t.Errorf("nested file content = %q, want %q", body, "record")
+	}
+
+	// The job writes its own paths inside the extracted tree afterwards.
+	if err := os.MkdirAll(filepath.Join(destDir, "docs", ".agent-execution", "results"), 0o755); err != nil {
+		t.Fatalf("worker cannot create its evidence namespace under an extracted directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "docs", "decisions", "0001.md"), []byte("rewritten"), 0o644); err != nil {
+		t.Fatalf("extracted file is not rewritable: %v", err)
+	}
+
+	for path, wantBits := range map[string]os.FileMode{
+		"docs":                   0o700,
+		"docs/decisions":         0o700,
+		"docs/decisions/0001.md": 0o600,
+		"run.sh":                 0o700,
+	} {
+		info, err := os.Stat(filepath.Join(destDir, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm() & wantBits; got != wantBits {
+			t.Errorf("%s mode = %o, want owner bits %o present", path, info.Mode().Perm(), wantBits)
+		}
+	}
+	// Execute bits carried by the archive survive.
+	info, err := os.Stat(filepath.Join(destDir, "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Errorf("run.sh mode = %o, want the archived execute bit preserved", info.Mode().Perm())
 	}
 }
 

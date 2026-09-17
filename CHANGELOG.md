@@ -40,9 +40,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   healthy rental when a fresh running phase conflicts with a stale terminal
   attempt row. It signals the agent's per-job stop path and lets completion
   sync close the attempt and launch.
-- **Pinned source extraction of nested directories**: Archived directory modes
-  are applied after the subtree is written, so a directory entry without the
-  owner write bit no longer blocks its own children and fails source fetch.
+- **Writable extracted source trees**: Pinned-source extraction restores
+  archived directory and file modes with the owner access bits forced on, and
+  applies directory modes only after the subtree exists. A read-only mode in
+  the archive no longer blocks nested extraction or the worker's own paths
+  inside the project root, such as agent-execution's `.agent-execution/results`.
 - **Torch 2.6 placement compatibility**: CUDA wheel variants now cap compatible
   devices at Hopper (`sm_90`), preventing unsupported Blackwell rentals while
   preserving the supported boundary.

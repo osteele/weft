@@ -29,10 +29,12 @@ func ExtractTarballReader(r io.Reader, destDir string) error {
 	defer gr.Close()
 
 	tr := tar.NewReader(gr)
-	// Directory modes are applied after the whole stream is written. A tar
-	// entry may carry a mode without the owner write or search bits; creating
-	// the directory with that mode first makes every later child under it
-	// fail with permission denied. Extract writable, harden afterwards.
+	// An extracted snapshot is a working tree the job writes into, not a
+	// read-only artifact: the worker creates its own paths inside the project
+	// root (agent-execution's .agent-execution/results, build outputs, caches).
+	// Archived modes are therefore restored with the owner access bits forced
+	// on, and directory modes are applied only after the subtree exists so a
+	// parent cannot seal itself before its children are written.
 	dirModes := map[string]os.FileMode{}
 	for {
 		hdr, err := tr.Next()
@@ -51,12 +53,12 @@ func ExtractTarballReader(r io.Reader, destDir string) error {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("create directory %s: %w", target, err)
 			}
-			dirModes[target] = os.FileMode(hdr.Mode).Perm()
+			dirModes[target] = ownerWritableDirMode(os.FileMode(hdr.Mode))
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("create parent directory for %s: %w", target, err)
 			}
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode))
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, ownerWritableFileMode(os.FileMode(hdr.Mode)))
 			if err != nil {
 				return fmt.Errorf("create file %s: %w", target, err)
 			}
@@ -66,6 +68,9 @@ func ExtractTarballReader(r io.Reader, destDir string) error {
 			}
 			if err := out.Close(); err != nil {
 				return fmt.Errorf("close %s: %w", target, err)
+			}
+			if err := os.Chmod(target, ownerWritableFileMode(os.FileMode(hdr.Mode))); err != nil {
+				return fmt.Errorf("set file mode %s: %w", target, err)
 			}
 		case tar.TypeSymlink:
 			if err := checkSymlinkWithinRoot(hdr.Name, hdr.Linkname); err != nil {
@@ -104,6 +109,18 @@ func applyDirModes(modes map[string]os.FileMode) error {
 		}
 	}
 	return nil
+}
+
+// ownerWritableDirMode keeps an archived directory's advertised permissions
+// while guaranteeing the extracting user can traverse and write inside it.
+func ownerWritableDirMode(mode os.FileMode) os.FileMode {
+	return mode.Perm() | 0o700
+}
+
+// ownerWritableFileMode preserves execute and group/other bits while
+// guaranteeing the extracting user can read and rewrite the file.
+func ownerWritableFileMode(mode os.FileMode) os.FileMode {
+	return mode.Perm() | 0o600
 }
 
 // safeExtractTarget validates a tar entry name against tar-slip attacks and
