@@ -1803,3 +1803,80 @@ func TestRunRunOnlineOnlyRejectionReceipts(t *testing.T) {
 		})
 	}
 }
+
+// An immediate dispatch whose sync never reached the host inside its budget
+// has observed nothing about the host, so the job must survive for the daemon
+// to finish dispatching. Deleting it converted a slow sync into lost work: the
+// budget is 10s while a real source sync measured 34-580s, and one consumer's
+// request spent all six attempts refusing this way while the host was healthy.
+func TestRunImmediateDispatchKeepsJobWhenHostWasNeverContacted(t *testing.T) {
+	database := db.SetupTestDB(t)
+	resetRunGlobals(t)
+	runDir = t.TempDir()
+	runHost = "host-alpha"
+	runIfOnline, runJSON = true, true
+	runAgent = "codex"
+	runIdempotencyKey = "uncontacted-retention"
+	t.Cleanup(func() {
+		runIfOnline, runJSON = false, false
+		runAgent, runIdempotencyKey = "", ""
+		runCapabilities = nil
+	})
+	host := inventory.HostSpec{
+		Name: "host-alpha", CPUCores: 8, Memory: "32GB",
+		Capabilities: []string{"agent:codex"}, AgentConcurrency: map[string]int{"codex": 1},
+	}
+	t.Cleanup(inventory.SetHosts([]inventory.HostSpec{host}))
+	t.Cleanup(ssh.SetRunner(func(_, _ string) (string, string, error) { return "", "", nil }))
+	oldEvaluate, oldSync, oldRecord, oldEnsure := evaluateRunPlacementFunc, syncRunHostFunc, recordQueuedJobMutationFunc, ensureDaemonStartedFunc
+	t.Cleanup(func() {
+		evaluateRunPlacementFunc, syncRunHostFunc, recordQueuedJobMutationFunc, ensureDaemonStartedFunc = oldEvaluate, oldSync, oldRecord, oldEnsure
+	})
+	recordQueuedJobMutationFunc = func(ctx context.Context, database *sql.DB, params ops.QueueJobParams) (int64, error) {
+		return ops.RecordQueuedJob(database, params)
+	}
+	ensureDaemonStartedFunc = func(daemoncontrol.Paths, time.Duration) (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+		return daemoncontrol.Status{Live: true}, daemoncontrol.EnsureNoop, nil
+	}
+	evaluateRunPlacementFunc = func(placement.EvaluateRequest) (*placement.PlacementPlan, error) {
+		return &placement.PlacementPlan{Unplaced: true}, nil
+	}
+	// The budget elapsed without reaching the host: no error, not contacted.
+	syncRunHostFunc = func(*sql.DB, string, ops.HostSyncOptions, ops.EnsureQueueRunnerFunc) (ops.HostSyncResult, error) {
+		return ops.HostSyncResult{HostContacted: false}, nil
+	}
+	database.Close()
+
+	cmd := newRunTestCommand()
+	var out, stderr bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&stderr)
+
+	if err := runRun(cmd, []string{"echo retain"}); err != nil {
+		t.Fatalf("unobserved dispatch refused instead of queueing: %v; stderr=%s", err, &stderr)
+	}
+
+	var receipt runSubmissionReceipt
+	if decodeErr := json.Unmarshal(out.Bytes(), &receipt); decodeErr != nil {
+		t.Fatalf("receipt JSON: %v; stdout=%s", decodeErr, &out)
+	}
+	if receipt.PlacementDecision != "queued" || receipt.Rejection != nil {
+		t.Fatalf("unobserved dispatch receipt = %+v, want queued with no rejection", receipt)
+	}
+	if receipt.JobID == "" {
+		t.Fatalf("queued receipt lost its job id: %+v", receipt)
+	}
+
+	readDB, openErr := db.Open()
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer readDB.Close()
+	var count int
+	if err := readDB.QueryRow(`SELECT COUNT(*) FROM jobs WHERE command = 'echo retain'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("unobserved dispatch left %d durable jobs, want 1", count)
+	}
+}

@@ -1744,7 +1744,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 			endSync()
 			job, getErr := db.GetJobByID(database, jobID)
 			accepted := getErr == nil && job != nil && job.LastSyncedStatus == db.StatusQueued
-			if !accepted {
+			unobserved := syncErr == nil && !syncResult.HostContacted
+			if !accepted && !unobserved {
+				// Cleanup belongs to a proven failure only. When the host was
+				// never contacted inside the budget the outcome is unobserved,
+				// so the job is left in place for the daemon; see below.
 				deleteErr := db.DeleteQueuedJobIfNeverStarted(database, jobID)
 				if errors.Is(deleteErr, db.ErrJobAlreadyStarted) {
 					accepted = true
@@ -1755,6 +1759,28 @@ func runRun(cmd *cobra.Command, args []string) error {
 				}
 			}
 			if !accepted {
+				// The host was never contacted inside the budget, which is an
+				// observation failure rather than a refusal. That budget is
+				// 10s while a real source sync to studio measures 34-580s, so
+				// reporting the deadline as "the host never acknowledged"
+				// destroyed work that would have run: a canary whose ack leg
+				// exceeded 145s completed on the host as wj8492, and one
+				// consumer's request spent all six attempts this way, minting
+				// six cycles for one subject.
+				//
+				// The job stays queued and the daemon finishes the dispatch,
+				// which is the path a non-immediate submission already takes.
+				// A hard sync error still refuses, and so does a contacted
+				// host that did not queue the job: both are evidence about the
+				// host rather than about our deadline.
+				if unobserved && job != nil {
+					ensureDaemonForWork(os.Stderr)
+					if runJSON {
+						return emitRunReceiptForJob(cmd, database, job, "queued", false, false, runIdempotencyKey)
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "Job %s queued on %s; immediate dispatch was not acknowledged within the budget, the daemon will complete it\n", ids.FormatJobID(jobID), host)
+					return nil
+				}
 				code := "dispatch_not_acknowledged"
 				var err error
 				if syncErr != nil {
