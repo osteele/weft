@@ -27,6 +27,8 @@ type queueBatchStatus struct {
 	FromR2        bool
 }
 
+const r2CompletionMarkerGracePeriod = 2 * time.Minute
+
 var syncJobStatusFromR2ForBatch = syncJobStatusFromR2
 
 // BatchSyncQueueRunnerJobs performs a batched sync for queue-runner jobs on one host/queue.
@@ -293,6 +295,36 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 				if status.FromR2 {
 					result, err := syncJobStatusFromR2ForBatch(database, job)
 					if err != nil {
+						since := status.Mtime
+						if since <= 0 && job.QueuedAt > 0 {
+							since = job.QueuedAt
+						}
+						if since <= 0 && job.CreatedAt > 0 {
+							since = job.CreatedAt
+						}
+						if since > 0 && now.Sub(time.Unix(since, 0)) >= r2CompletionMarkerGracePeriod {
+							slog.Warn("R2 runner reported completion but no R2 completion record found; recording completion from runner state", "component", "sync", "job_id", job.ID, "exit_code", *status.ExitCode, "finished_at", status.Mtime)
+							recordQueueDispatchOK(database, job.ID)
+							endTime := status.Mtime
+							if endTime <= 0 {
+								endTime = now.Unix()
+							}
+							runID := int64(0)
+							if job.LatestRunID != nil {
+								runID = *job.LatestRunID
+							}
+							if runID > 0 {
+								if recErr := RecordJobAttemptCompletion(database, job.ID, runID, *status.ExitCode, job.StartTime, endTime); recErr != nil {
+									return updated, recErr
+								}
+							} else {
+								if recErr := RecordJobCompletion(database, job.ID, *status.ExitCode, endTime); recErr != nil {
+									return updated, recErr
+								}
+							}
+							updated++
+							continue
+						}
 						slog.Debug("R2 runner reported completion before result marker was readable", "component", "sync", "job_id", job.ID, "error", err)
 						continue
 					}

@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -455,5 +457,62 @@ func TestBatchSyncSkipsUnknownJobs(t *testing.T) {
 	result, _ := db.GetJobByID(database, jobID)
 	if result.Status != db.StatusQueued {
 		t.Fatalf("expected status queued, got %s", result.Status)
+	}
+}
+
+func TestApplyBatchStatusesR2FallbackWhenMarkerMissingAfterGracePeriod(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "echo test", "r2 missing marker")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	origSync := syncJobStatusFromR2ForBatch
+	t.Cleanup(func() { syncJobStatusFromR2ForBatch = origSync })
+	syncJobStatusFromR2ForBatch = func(_ *sql.DB, _ *db.Job) (SyncResult, error) {
+		return SyncResult{}, fmt.Errorf("R2 completion not found")
+	}
+
+	exitCode := 0
+	finishedAt := int64(1700000000)
+	statuses := map[int64]queueBatchStatus{
+		jobID: {ExitCode: &exitCode, Mtime: finishedAt, FromR2: true},
+	}
+
+	// 1. When within the grace period (30s after finish), sync is skipped to wait for R2.
+	nowRecent := time.Unix(finishedAt+30, 0)
+	updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, effectiveQueueUnknownAfter(0), nowRecent)
+	if err != nil {
+		t.Fatalf("applyBatchStatusesAt: %v", err)
+	}
+	if updated != 0 {
+		t.Fatalf("expected 0 updates within grace period, got %d", updated)
+	}
+	result, _ := db.GetJobByID(database, jobID)
+	if result.Status != db.StatusQueued {
+		t.Fatalf("expected status queued, got %s", result.Status)
+	}
+
+	// 2. When after the grace period (3 minutes after finish), sync falls back to runner state.
+	nowExpired := time.Unix(finishedAt+180, 0)
+	updated, err = applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, effectiveQueueUnknownAfter(0), nowExpired)
+	if err != nil {
+		t.Fatalf("applyBatchStatusesAt: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("expected 1 update after grace period, got %d", updated)
+	}
+	result, _ = db.GetJobByID(database, jobID)
+	if result.Status != db.StatusCompleted || result.ExitCode == nil || *result.ExitCode != 0 {
+		t.Fatalf("expected status completed with exit 0, got status=%s exit=%v", result.Status, result.ExitCode)
+	}
+	if result.EndTime == nil || *result.EndTime != finishedAt {
+		t.Fatalf("expected end time %d, got %v", finishedAt, result.EndTime)
 	}
 }

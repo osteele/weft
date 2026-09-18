@@ -165,3 +165,48 @@ func TestSyncInventoryPublicationReportsIngestsStandaloneReport(t *testing.T) {
 		t.Fatalf("publication state = %+v", state)
 	}
 }
+
+func TestSyncJobStatusFromR2FallsBackToCompletionRecordWhenCompleteMarkerMissing(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "true", "missing complete marker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.LatestRunID == nil {
+		t.Fatal("queued job has no attempt ID")
+	}
+	runID := *job.LatestRunID
+
+	// Supply ONLY <id>.completion.json; .complete marker is intentionally missing.
+	currentResultKey := r2keys.JobAttemptResultsPrefix(jobID, runID) + fmt.Sprintf("%d.completion.json", jobID)
+	getter := mapObjectGetter{
+		currentResultKey: []byte(
+			fmt.Sprintf(`{"run_id":%d,"exit_code":0,"start_time":1700000020,"end_time":1700000030}`, runID),
+		),
+	}
+
+	result, err := syncJobStatusFromR2WithClient(context.Background(), getter, database, job)
+	if err != nil {
+		t.Fatalf("syncJobStatusFromR2WithClient failed: %v", err)
+	}
+	if !result.Updated {
+		t.Fatal("syncJobStatusFromR2WithClient did not report an update")
+	}
+	completed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != db.StatusCompleted || completed.ExitCode == nil || *completed.ExitCode != 0 {
+		t.Fatalf("completed job = status %q exit %v", completed.Status, completed.ExitCode)
+	}
+	if completed.StartTime != 1700000020 {
+		t.Fatalf("completed start time = %d, want 1700000020", completed.StartTime)
+	}
+	if completed.EndTime == nil || *completed.EndTime != 1700000030 {
+		t.Fatalf("completed end time = %v, want 1700000030", completed.EndTime)
+	}
+}

@@ -36,22 +36,28 @@ func syncJobStatusFromR2WithClient(ctx context.Context, client r2ObjectGetter, d
 		return SyncResult{}, fmt.Errorf("job %s has no current attempt for R2 completion sync", ids.FormatJobID(job.ID))
 	}
 	runID := *job.LatestRunID
+
+	var (
+		exitCode     int
+		haveExitCode bool
+		startTime    int64
+		endTime      int64
+	)
+
 	completeKey := r2keys.JobAttemptComplete(job.ID, runID)
-	data, err := client.GetObject(ctx, completeKey)
-	if err != nil {
-		return SyncResult{}, fmt.Errorf("R2 .complete not found for job %s run %d", ids.FormatJobID(job.ID), runID)
+	if data, err := client.GetObject(ctx, completeKey); err == nil {
+		if code, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
+			exitCode = code
+			haveExitCode = true
+		}
 	}
 
-	exitCode, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return SyncResult{}, fmt.Errorf("parse R2 exit code for job %s run %d: %w", ids.FormatJobID(job.ID), runID, err)
-	}
-
-	// Backfill timing only from the completion record for this exact attempt.
-	var startTime, endTime int64
+	// Read completion record for this exact attempt. This serves both to backfill
+	// timing and as an authoritative fallback for the exit code if the .complete
+	// marker was not written or was lost.
 	completionKey := r2keys.JobAttemptResultsPrefix(job.ID, runID) + fmt.Sprintf("%d.completion.json", job.ID)
 	if compData, compErr := client.GetObject(ctx, completionKey); compErr == nil {
-		completionRunID, parsedStart, parsedEnd := parseCompletionRecordTimes(compData)
+		completionRunID, parsedExit, parsedStart, parsedEnd := parseCompletionRecord(compData)
 		if completionRunID != runID {
 			return SyncResult{}, fmt.Errorf(
 				"R2 completion record run mismatch for job %s: got %d, want %d",
@@ -59,7 +65,16 @@ func syncJobStatusFromR2WithClient(ctx context.Context, client r2ObjectGetter, d
 			)
 		}
 		startTime, endTime = parsedStart, parsedEnd
+		if !haveExitCode && parsedExit != nil {
+			exitCode = *parsedExit
+			haveExitCode = true
+		}
 	}
+
+	if !haveExitCode {
+		return SyncResult{}, fmt.Errorf("R2 completion not found for job %s run %d", ids.FormatJobID(job.ID), runID)
+	}
+
 	if endTime == 0 {
 		endTime = time.Now().Unix()
 	}
@@ -132,17 +147,26 @@ func syncInventoryPublicationReportsWithClient(ctx context.Context, client r2Obj
 	return updated
 }
 
-// parseCompletionRecordTimes extracts run_id, start_time, and end_time from a
+// parseCompletionRecord extracts run_id, exit_code, start_time, and end_time from a
 // runner completion record (<id>.completion.json). Missing or malformed
-// fields yield zeros.
-func parseCompletionRecordTimes(data []byte) (runID, startTime, endTime int64) {
+// fields yield zeros or nil exit_code.
+func parseCompletionRecord(data []byte) (runID int64, exitCode *int, startTime, endTime int64) {
 	var rec struct {
 		RunID     int64 `json:"run_id"`
+		ExitCode  *int  `json:"exit_code"`
 		StartTime int64 `json:"start_time"`
 		EndTime   int64 `json:"end_time"`
 	}
 	if json.Unmarshal(data, &rec) != nil {
-		return 0, 0, 0
+		return 0, nil, 0, 0
 	}
-	return rec.RunID, rec.StartTime, rec.EndTime
+	return rec.RunID, rec.ExitCode, rec.StartTime, rec.EndTime
+}
+
+// parseCompletionRecordTimes extracts run_id, start_time, and end_time from a
+// runner completion record (<id>.completion.json). Missing or malformed
+// fields yield zeros.
+func parseCompletionRecordTimes(data []byte) (runID, startTime, endTime int64) {
+	runID, _, startTime, endTime = parseCompletionRecord(data)
+	return runID, startTime, endTime
 }
