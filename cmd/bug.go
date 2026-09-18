@@ -46,7 +46,7 @@ type bugTracker interface {
 
 var bugCmd = &cobra.Command{
 	Use:   "bug",
-	Short: "Report and inspect Weft bugs",
+	Short: "Report and inspect Weft issues (stored in the shared agent-issues ledger)",
 }
 
 var bugReportCmd = &cobra.Command{
@@ -92,8 +92,8 @@ var bugReopenCmd = &cobra.Command{
 }
 
 var bugTrackerCmd = &cobra.Command{
-	Use:   "tracker [github|local]",
-	Short: "Show or set the Weft bug tracker backend",
+	Use:   "tracker [issues|github|local]",
+	Short: "Show or set the Weft bug tracker backend (default: the shared agent-issues ledger)",
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runBugTrackerConfig,
 }
@@ -273,6 +273,8 @@ func currentBugTracker() (bugTracker, error) {
 		return nil, err
 	}
 	switch tracker {
+	case config.BugTrackerIssues:
+		return newIssuesBugTracker(cfg.BugComponent()), nil
 	case config.BugTrackerLocal:
 		return localBugTracker{}, nil
 	case config.BugTrackerGitHub:

@@ -134,9 +134,9 @@ func SetProviderEnabledSetting(provider cloud.Provider, enabled *bool) error {
 func SetBugTrackerSetting(tracker string) error {
 	normalized := strings.ToLower(strings.TrimSpace(tracker))
 	switch normalized {
-	case "", BugTrackerGitHub, BugTrackerLocal:
+	case "", BugTrackerIssues, BugTrackerGitHub, BugTrackerLocal:
 	default:
-		return fmt.Errorf("unknown bug tracker %q (expected github or local)", tracker)
+		return fmt.Errorf("unknown bug tracker %q (expected issues, github or local)", tracker)
 	}
 	return UpdateGlobalTOML(func(tree *toml.Tree) error {
 		path := []string{"bug", "tracker"}

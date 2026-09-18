@@ -168,13 +168,21 @@ func (c *Config) CLILocation() (*time.Location, error) {
 const (
 	BugTrackerGitHub = "github"
 	BugTrackerLocal  = "local"
+	// BugTrackerIssues forwards `weft bug` to the shared agent-issues ledger,
+	// which owns weft's issue history after the 2026-09-17 migration. It is
+	// the default; "local" remains available to read the pre-migration ledger.
+	BugTrackerIssues = "issues"
 )
 
 // BugConfig configures the backing issue tracker for `weft bug`.
 type BugConfig struct {
-	// Tracker selects the bug tracker backend. Valid values are "github" and
-	// "local"; empty defaults to "github".
+	// Tracker selects the bug tracker backend. Valid values are "issues",
+	// "github" and "local"; empty defaults to "issues".
 	Tracker string `yaml:"tracker" toml:"tracker"`
+
+	// Component is the agent-issues component to file against when Tracker is
+	// "issues". Empty defaults to "weft".
+	Component string `yaml:"component" toml:"component"`
 
 	// GitHubRepo optionally overrides the GitHub repository used by the gh CLI,
 	// in OWNER/REPO form. Empty lets gh infer the current repository.
@@ -1387,20 +1395,33 @@ func (c *Config) AutopilotOfferSnapshotTTL() time.Duration {
 }
 
 // BugTracker returns the configured bug tracker backend. Empty configuration
-// defaults to GitHub.
+// defaults to the shared agent-issues ledger.
 func (c *Config) BugTracker() (string, error) {
 	if c == nil {
-		return BugTrackerGitHub, nil
+		return BugTrackerIssues, nil
 	}
 	tracker := strings.ToLower(strings.TrimSpace(c.Bug.Tracker))
 	switch tracker {
-	case "", BugTrackerGitHub:
+	case "", BugTrackerIssues:
+		return BugTrackerIssues, nil
+	case BugTrackerGitHub:
 		return BugTrackerGitHub, nil
 	case BugTrackerLocal:
 		return BugTrackerLocal, nil
 	default:
-		return "", fmt.Errorf("unknown bug tracker %q (expected github or local)", c.Bug.Tracker)
+		return "", fmt.Errorf("unknown bug tracker %q (expected issues, github or local)", c.Bug.Tracker)
 	}
+}
+
+// BugComponent is the agent-issues component weft files against.
+func (c *Config) BugComponent() string {
+	if c == nil {
+		return "weft"
+	}
+	if component := strings.TrimSpace(c.Bug.Component); component != "" {
+		return component
+	}
+	return "weft"
 }
 
 var (

@@ -107,8 +107,10 @@ func TestBugTrackerDefaultAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tracker != BugTrackerGitHub {
-		t.Fatalf("default bug tracker = %q, want %q", tracker, BugTrackerGitHub)
+	// Unconfigured weft files against the shared agent-issues ledger, which
+	// owns weft's issue history since the 2026-09-17 migration.
+	if tracker != BugTrackerIssues {
+		t.Fatalf("default bug tracker = %q, want %q", tracker, BugTrackerIssues)
 	}
 
 	if err := SetBugTrackerSetting(BugTrackerLocal); err != nil {
@@ -124,6 +126,24 @@ func TestBugTrackerDefaultAndOverride(t *testing.T) {
 	}
 	if tracker != BugTrackerLocal {
 		t.Fatalf("configured bug tracker = %q, want %q", tracker, BugTrackerLocal)
+	}
+
+	if err := SetBugTrackerSetting(BugTrackerGitHub); err != nil {
+		t.Fatalf("SetBugTrackerSetting(github): %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker, err = cfg.BugTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracker != BugTrackerGitHub {
+		t.Fatalf("configured bug tracker = %q, want %q", tracker, BugTrackerGitHub)
+	}
+	if component := cfg.BugComponent(); component != "weft" {
+		t.Fatalf("default bug component = %q, want weft", component)
 	}
 }
 

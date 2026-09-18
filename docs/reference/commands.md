@@ -876,31 +876,35 @@ is not the final job cost to record in an experiment.
 
 ### weft bug
 
-Record and inspect Weft bug reports. By default, `weft bug` uses GitHub issues
-through the `gh` CLI and uses GitHub issue numbers (`#123`). Configure the
-legacy local tracker to keep reports in `~/.local/state/weft/bugs.db`, a small
-SQLite database that is separate from the main jobs database and uses `wb<id>`
-identifiers:
+Record and inspect Weft issues. Weft's issue history lives in the shared
+agent-issues ledger, under the component `weft` and with its original `wb<id>`
+numbers, so `weft bug` forwards to the `issues` CLI. The commands below keep
+working; new work can use `issues ... --component weft` directly.
 
 ```toml
 [bug]
-tracker = "local"
+tracker = "issues"   # default; "github" files GitHub issues, "local" reads the
+                     # pre-migration ledger at ~/.local/state/weft/bugs.db
+component = "weft"   # the agent-issues component to file against
 ```
 
 You can also set it from the CLI:
 
 ```bash
+weft bug tracker issues
 weft bug tracker local
 weft bug tracker github
 ```
 
+The `issues` CLI must be on PATH; install it from
+`~/code/agent-tools/agent-issues`. Weft's `--job` and `--host` flags are folded
+into the ledger's single `ref` field, as `wj6066 on studio`.
+
 Bug reports are for Weft runtime defects and invariant violations, not for
 normal job failures or feature requests.
 
-Older bug records that were written to `jobs.db` are imported into `bugs.db`
-the first time `weft bug` opens the standalone bug database in local-tracker
-mode. Imported records keep their original detail and notes, and receive an
-import note with the legacy bug id.
+Records from the pre-migration ledger were imported into agent-issues with
+`issues import-weft`, keeping their numbers, detail, notes and close verdicts.
 
 ```bash
 weft bug report --title "runner pending job is missing queue payload" \
@@ -911,13 +915,13 @@ weft bug report --title "runner pending job is missing queue payload" \
   --host studio \
   --detail "raw maintainer details"
 
-weft bug note '#123' "additional context from a later observation"
-printf '%s\n' "context with 'quotes'" | weft bug note --stdin '#123'
+weft bug note wb123 "additional context from a later observation"
+printf '%s\n' "context with 'quotes'" | weft bug note --stdin wb123
 weft bug list
 weft bug list --all
-weft bug show '#123'
-weft bug close '#123' --reason "fixed in e95f1f4e"
-weft bug reopen '#123'
+weft bug show wb123
+weft bug close wb123 --reason "fixed in e95f1f4e"
+weft bug reopen wb123
 ```
 
 `report` returns a bug number. If another open bug has the same fingerprint,
@@ -939,7 +943,7 @@ Important fields:
 
 When Weft detects an internal invariant failure that might otherwise mislead
 users, status output may show a concise `Weft bug #123` or `Weft bug wb123`
-message instead of raw implementation details. Use `weft bug show <id>` for the
+message instead of raw implementation details. Use `issues show <id>` for the
 maintainer record.
 
 ### weft job inspect / diff
