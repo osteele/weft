@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -78,7 +79,11 @@ type sourceUploadObject struct {
 	label       string
 	contentType string
 	progress    string
-	open        func() (*os.File, func(), error)
+	// size is the on-disk byte count, used to derive the upload budget. Zero
+	// means the size could not be determined; it is a floor on the budget,
+	// never a claim that the object is empty.
+	size int64
+	open func() (*os.File, func(), error)
 }
 
 type sourceClosureReceipt struct {
@@ -239,10 +244,22 @@ func uploadSourceRootsToR2(ctx context.Context, store sourceObjectStore, localDi
 		}
 	}
 
+	var pendingBytes int64
+	for _, object := range missing {
+		pendingBytes += object.size
+	}
+	budget := SourceUploadBudget(pendingBytes)
+	uploadCtx, cancelBudget := context.WithTimeout(ctx, budget)
+	defer cancelBudget()
+
 	uploadStarted := time.Now()
 	for _, object := range missing {
 		onProgress(object.progress)
-		if err := uploadSourceObject(ctx, store, object); err != nil {
+		if err := uploadSourceObject(uploadCtx, store, object); err != nil {
+			if ctx.Err() == nil && uploadCtx.Err() != nil && !errors.Is(err, ErrSourceUploadStalled) {
+				return SourceUploadResult{}, fmt.Errorf("%w: %s of source did not upload within %s",
+					ErrSourceUploadBudgetExceeded, formatSize(pendingBytes), budget)
+			}
 			return SourceUploadResult{}, err
 		}
 		stats.UploadedObjects++
@@ -293,6 +310,7 @@ func buildSourceUploadObjects(build sourceManifestBuild) ([]sourceUploadObject, 
 				label:       blobLabel,
 				contentType: "application/octet-stream",
 				progress:    "uploading source blob",
+				size:        fileSizeOrZero(blobPath),
 				open: func() (*os.File, func(), error) {
 					return openSourceBlobSnapshot(blobPath, blobHash)
 				},
@@ -312,6 +330,7 @@ func buildSourceUploadObjects(build sourceManifestBuild) ([]sourceUploadObject, 
 			label:       rootLabel,
 			contentType: "application/gzip",
 			progress:    "uploading source",
+			size:        fileSizeOrZero(tarPath),
 			open: func() (*os.File, func(), error) {
 				file, err := os.Open(tarPath)
 				return file, func() {}, err
@@ -329,8 +348,20 @@ func uploadSourceObject(ctx context.Context, store sourceObjectStore, object sou
 		return fmt.Errorf("open %s: %w", object.label, err)
 	}
 	defer cleanup()
-	if err := store.PutObject(ctx, object.key, file, object.contentType); err != nil {
+
+	// A stalled uplink is cancelled by the watchdog rather than waited out, so
+	// a wedged transfer fails by name instead of running out an unrelated
+	// wall-clock budget.
+	uploadCtx, cancelUpload := context.WithCancel(ctx)
+	defer cancelUpload()
+	body := newStallWatchedReader(file, SourceUploadStallTimeout, cancelUpload)
+	defer body.stop()
+
+	if err := store.PutObject(uploadCtx, object.key, body, object.contentType); err != nil {
 		_ = file.Close()
+		if body.stalled() {
+			return describeStall(object.label, SourceUploadStallTimeout)
+		}
 		return fmt.Errorf("upload %s: %w", object.label, err)
 	}
 	if err := file.Close(); err != nil {
@@ -626,4 +657,15 @@ func stageSourceDirWithLocalInputsLimit(localDir string, inputs []string, maxByt
 	}
 	dir, cleanup, err := buildSourceSnapshotWithOverlaysLimit(localDir, overlays, maxBytes)
 	return dir, names, cleanup, err
+}
+
+// fileSizeOrZero returns the size of path, or 0 when it cannot be determined.
+// A zero only lowers the derived upload budget toward its base; it never
+// shortens an upload that is making progress, which the stall watchdog owns.
+func fileSizeOrZero(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }

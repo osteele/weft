@@ -2376,9 +2376,13 @@ func pinRunSourceSnapshot(ctx context.Context, localDir string, inputs []string,
 	if err != nil {
 		return nil, err
 	}
-	uploadCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-	result, err := srcsync.UploadCloudSourceRootsToR2WithProgressForInputsAndCommands(uploadCtx, client, localDir, inputs, commands, nil)
+	// No flat wall-clock cap here: a fixed budget cannot bound a phase whose
+	// duration is set by payload size and link speed, and a 10-minute one
+	// admitted payloads it could not deliver (wb149). The sync layer bounds
+	// the phases it can size — a stall watchdog per object and a
+	// size-derived total — so a slow link finishes and a wedged one fails
+	// by name.
+	result, err := srcsync.UploadCloudSourceRootsToR2WithProgressForInputsAndCommands(ctx, client, localDir, inputs, commands, nil)
 	if err != nil {
 		return nil, err
 	}
