@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strconv"
@@ -119,18 +120,30 @@ Examples:
 
 var queueUpdateCmd = &cobra.Command{
 	Use:   "update [host]",
-	Short: "Update the queue runner agent on a remote host",
-	Long: `Deploy the current queue runner agent on a remote host.
+	Short: "Update the queue runner agent on one host or across the fleet",
+	Long: `Deploy the current queue runner agent on remote hosts.
 
 If the binary changed and the runner is active, it re-execs into the new
 version while preserving pending and running job state.
 
+With --all or --hosts, every named host is attempted even if an earlier one
+fails, and a per-host summary is printed. A host that could not be reached is
+reported separately from one that failed to converge: an unreachable host is an
+unobserved host, not a known-stale one.
+
 Examples:
   weft queue update cool30
-  weft queue update --host cool30`,
+  weft queue update --host cool30
+  weft queue update --all
+  weft queue update --hosts cool30,studio`,
 	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueUpdate,
 }
+
+var (
+	queueUpdateAll   bool
+	queueUpdateHosts []string
+)
 
 var queueRemoveCmd = &cobra.Command{
 	Use:   "remove <job-id>...",
@@ -299,6 +312,8 @@ func init() {
 	addQueueHostFlag(queueListCmd)
 	addQueueHostFlag(queueStatusCmd)
 	addQueueHostFlag(queueUpdateCmd)
+	queueUpdateCmd.Flags().BoolVar(&queueUpdateAll, "all", false, "Converge every inventory host")
+	queueUpdateCmd.Flags().StringSliceVar(&queueUpdateHosts, "hosts", nil, "Converge the named hosts (comma-separated)")
 
 	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path; alias: --dir)")
 	queueAddCmd.Flags().StringVar(&queueProject, "project", "", "Project name (default: repo root name for the working directory)")
@@ -895,12 +910,102 @@ func queueAgentVersionLines(host string, running, deployed versionReading) []str
 	return lines
 }
 
+// queueUpdateOutcome is one host's result in a fleet convergence run.
+// unreachable is kept distinct from a convergence failure: not having been
+// able to look is not the same as having looked and found the host wrong.
+type queueUpdateOutcome struct {
+	host        string
+	err         error
+	unreachable bool
+}
+
 func runQueueUpdate(cmd *cobra.Command, args []string) error {
-	host, err := resolveQueueHost(args)
+	hosts, err := resolveQueueUpdateHosts(cmd, args)
 	if err != nil {
 		return err
 	}
+	if len(hosts) == 1 {
+		return updateQueueHost(cmd, hosts[0])
+	}
 
+	outcomes := make([]queueUpdateOutcome, 0, len(hosts))
+	for _, host := range hosts {
+		err := updateQueueHost(cmd, host)
+		outcomes = append(outcomes, queueUpdateOutcome{
+			host:        host,
+			err:         err,
+			unreachable: err != nil && ssh.IsConnectionError(err.Error()),
+		})
+	}
+	return reportQueueUpdateOutcomes(cmd.OutOrStdout(), outcomes)
+}
+
+// resolveQueueUpdateHosts returns the hosts to converge. --all selects every
+// inventory host.
+func resolveQueueUpdateHosts(cmd *cobra.Command, args []string) ([]string, error) {
+	if queueUpdateAll && len(queueUpdateHosts) > 0 {
+		return nil, fmt.Errorf("--all and --hosts are mutually exclusive")
+	}
+	// --host names one host the same way a positional argument does, so a
+	// fleet selector must reject it too. Letting it through would converge
+	// the fleet while silently ignoring the host the caller named.
+	if (queueUpdateAll || len(queueUpdateHosts) > 0) && (len(args) > 0 || queueHost != "") {
+		return nil, fmt.Errorf("a host argument or --host cannot be combined with --all or --hosts")
+	}
+	if len(queueUpdateHosts) > 0 {
+		for _, host := range queueUpdateHosts {
+			if inventory.FindHost(host) == nil {
+				return nil, fmt.Errorf("host %q is not in the local inventory; run 'weft host discover %s' first", host, host)
+			}
+		}
+		return queueUpdateHosts, nil
+	}
+	if queueUpdateAll {
+		specs, err := inventory.LoadHosts()
+		if err != nil {
+			return nil, fmt.Errorf("load inventory hosts: %w", err)
+		}
+		var hosts []string
+		for _, spec := range specs {
+			hosts = append(hosts, spec.Name)
+		}
+		if len(hosts) == 0 {
+			return nil, fmt.Errorf("no inventory hosts are configured; run 'weft host discover <host>' first")
+		}
+		return hosts, nil
+	}
+	host, err := resolveQueueHost(args)
+	if err != nil {
+		return nil, err
+	}
+	return []string{host}, nil
+}
+
+// reportQueueUpdateOutcomes prints the per-host summary and returns an error
+// when any host did not converge.
+func reportQueueUpdateOutcomes(out io.Writer, outcomes []queueUpdateOutcome) error {
+	var failed, unreachable int
+	fmt.Fprintln(out, "\nFleet summary:")
+	for _, outcome := range outcomes {
+		switch {
+		case outcome.err == nil:
+			fmt.Fprintf(out, "  %-12s converged\n", outcome.host)
+		case outcome.unreachable:
+			unreachable++
+			fmt.Fprintf(out, "  %-12s unreachable (version on this host remains unobserved): %v\n", outcome.host, outcome.err)
+		default:
+			failed++
+			fmt.Fprintf(out, "  %-12s failed: %v\n", outcome.host, outcome.err)
+		}
+	}
+	if failed == 0 && unreachable == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d of %d hosts did not converge (%d failed, %d unreachable)",
+		failed+unreachable, len(outcomes), failed, unreachable)
+}
+
+func updateQueueHost(cmd *cobra.Command, host string) error {
 	spec := inventory.FindHost(host)
 	if spec == nil {
 		return fmt.Errorf("host %q is not in the local inventory; run 'weft host discover %s' first", host, host)

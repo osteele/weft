@@ -26,6 +26,45 @@ just deploy-agent <host>     # or: weft queue update <host>
 
 Hosts must be in the local inventory first (`weft host discover <hostname>`).
 
+To converge more than one host, pass `--all` (every inventory host) or
+`--hosts a,b`. Every named host is attempted even if an earlier one fails, and
+a per-host summary is printed. A host that could not be reached is reported
+separately from one that failed to converge, and the exit status is non-zero if
+any host did not converge.
+
+## Verify what is deployed
+
+```bash
+weft host agent-status            # cached observations, no SSH or R2 requests
+weft host agent-status --json     # same, versioned schema
+```
+
+It prints, per inventory host, the desired version (computed from the local
+source tree), the last verified deployed version, the latest runner identity,
+the queue protocol version, and how old each observation is.
+
+`STATUS` is three-valued, and the distinction is the point:
+
+- `current` — desired, deployed, and running versions agree.
+- `stale` — a version was observed and it differs from the desired build.
+- `unknown` — nothing was observed, the observation is too old to trust, or the
+  desired version could not be computed. An unobserved host is not a
+  known-stale host, and the `DETAIL` column says which case applies.
+
+**The agent version is a content hash over `cmd/agent`'s transitive source
+closure** (`localAgentSourceVersion`, `internal/agentdeploy/version.go`), with
+the jj or git commit id as a fallback. So changing any package the agent
+imports — `internal/sync`, say — changes the desired version and triggers a
+redeploy, even when the resulting binary is byte-identical.
+
+**Do not verify a deployment by grepping the remote binary for strings.** Go's
+linker eliminates code that is unreachable from the binary's entry point, so a
+symbol can be absent from `weft-agent` purely because the agent never calls it,
+regardless of which source built it. A string search therefore reports staleness
+that is not there. Compare versions instead: `weft host agent-status`, or
+`weft-agent --version` on the host against a local `weft build-agents
+--from-source`.
+
 ## SSH accounts
 
 Hosts without an `ssh_user` override in `~/.config/weft/config.toml` resolve
