@@ -110,14 +110,7 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 			"rclone copyto \"r2:$R2_BUCKET/%s\" /tmp/src.tar.gz && tar xzf /tmp/src.tar.gz -C %q && rm -f /tmp/src.tar.gz\n",
 			src.R2Key, src.RemoteDir,
 		))
-		for _, blob := range src.Blobs {
-			target := filepath.ToSlash(filepath.Join(src.RemoteDir, filepath.FromSlash(blob.RelPath)))
-			b.WriteString(fmt.Sprintf("mkdir -p %q\n", filepath.Dir(target)))
-			b.WriteString(fmt.Sprintf(
-				"rclone copyto \"r2:$R2_BUCKET/%s\" %q && printf '%%s  %%s\\n' %q %q | sha256sum -c -\n",
-				blob.R2Key, target, blob.SHA256, target,
-			))
-		}
+		writeSourceBlobs(&b, src)
 		writeStageMarker(&b, manifest.DBInstanceID, fmt.Sprintf("sources_extracting:%d/%d", i+1, sourceCount))
 	}
 	writeStageMarker(&b, manifest.DBInstanceID, "sources_extracted")
@@ -131,6 +124,77 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 	}
 
 	return b.String()
+}
+
+// writeSourceBlobs emits bash commands to batch download, place, and verify
+// content-addressed source blobs for a source mapping.
+func writeSourceBlobs(b *strings.Builder, src SourceMapping) {
+	if len(src.Blobs) == 0 {
+		return
+	}
+	b.WriteString(fmt.Sprintf("# Materialize source blobs for %s\n", src.RemoteDir))
+	stagePattern := filepath.ToSlash(filepath.Join(src.RemoteDir, ".weft-blobs.XXXXXX"))
+	b.WriteString(fmt.Sprintf("_blob_stage=$(mktemp -d %q)\n", stagePattern))
+	b.WriteString("trap 'rm -rf \"${_blob_stage:-}\"' EXIT\n")
+
+	// Count occurrences of each key to use `mv` on the last reference
+	keyCount := make(map[string]int, len(src.Blobs))
+	for _, blob := range src.Blobs {
+		keyCount[blob.R2Key]++
+	}
+
+	// Deduplicate R2 keys for batch download
+	seenKeys := make(map[string]struct{}, len(src.Blobs))
+	var uniqueKeys []string
+	for _, blob := range src.Blobs {
+		if _, ok := seenKeys[blob.R2Key]; !ok {
+			seenKeys[blob.R2Key] = struct{}{}
+			uniqueKeys = append(uniqueKeys, blob.R2Key)
+		}
+	}
+
+	b.WriteString("cat <<'EOF' > \"$_blob_stage/files-from.txt\"\n")
+	for _, key := range uniqueKeys {
+		b.WriteString(key)
+		b.WriteString("\n")
+	}
+	b.WriteString("EOF\n")
+
+	b.WriteString("if ! rclone copy \"r2:$R2_BUCKET\" \"$_blob_stage\" --files-from \"$_blob_stage/files-from.txt\"; then\n")
+	b.WriteString("  echo \"weft: batch blob copy failed; falling back to individual download\" >&2\n")
+	b.WriteString("  while IFS= read -r _blob_key; do\n")
+	b.WriteString("    [ -n \"$_blob_key\" ] || continue\n")
+	b.WriteString("    mkdir -p \"$_blob_stage/$(dirname \"$_blob_key\")\"\n")
+	b.WriteString("    rclone copyto \"r2:$R2_BUCKET/$_blob_key\" \"$_blob_stage/$_blob_key\"\n")
+	b.WriteString("  done < \"$_blob_stage/files-from.txt\"\n")
+	b.WriteString("fi\n")
+
+	b.WriteString("while IFS=$'\\t' read -r _action _blob_key _target; do\n")
+	b.WriteString("  [ -n \"$_blob_key\" ] || continue\n")
+	b.WriteString("  mkdir -p \"$(dirname \"$_target\")\"\n")
+	b.WriteString("  \"$_action\" \"$_blob_stage/$_blob_key\" \"$_target\"\n")
+	b.WriteString("done <<'EOF'\n")
+	seenCount := make(map[string]int, len(src.Blobs))
+	for _, blob := range src.Blobs {
+		seenCount[blob.R2Key]++
+		action := "cp"
+		if seenCount[blob.R2Key] == keyCount[blob.R2Key] {
+			action = "mv"
+		}
+		target := filepath.ToSlash(filepath.Join(src.RemoteDir, filepath.FromSlash(blob.RelPath)))
+		b.WriteString(fmt.Sprintf("%s\t%s\t%s\n", action, blob.R2Key, target))
+	}
+	b.WriteString("EOF\n")
+
+	b.WriteString("sha256sum -c - <<'EOF'\n")
+	for _, blob := range src.Blobs {
+		target := filepath.ToSlash(filepath.Join(src.RemoteDir, filepath.FromSlash(blob.RelPath)))
+		b.WriteString(fmt.Sprintf("%s  %s\n", blob.SHA256, target))
+	}
+	b.WriteString("EOF\n")
+
+	b.WriteString("rm -rf \"$_blob_stage\"\n")
+	b.WriteString("trap - EXIT\n")
 }
 
 // writeHFDownloads emits bash commands to pre-download declared HF assets.

@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -18,17 +19,86 @@ func TestBootstrapMaterializesSourceBlobsBeforeStartingAgent(t *testing.T) {
 			}},
 		}},
 	})
-	blobCopy := `rclone copyto "r2:$R2_BUCKET/assets/abc123" "/workspace/project/data/training.pkl"`
-	if !strings.Contains(script, blobCopy) {
-		t.Fatalf("bootstrap missing blob copy %q:\n%s", blobCopy, script)
+	batchCopy := `rclone copy "r2:$R2_BUCKET" "$_blob_stage" --files-from "$_blob_stage/files-from.txt"`
+	if !strings.Contains(script, batchCopy) {
+		t.Fatalf("bootstrap missing batch blob copy %q:\n%s", batchCopy, script)
+	}
+	if !strings.Contains(script, `_blob_stage=$(mktemp -d "/workspace/project/.weft-blobs.XXXXXX")`) {
+		t.Fatalf("bootstrap missing staging directory under remote dir:\n%s", script)
+	}
+	if !strings.Contains(script, `trap 'rm -rf "${_blob_stage:-}"' EXIT`) {
+		t.Fatalf("bootstrap missing EXIT trap for staging cleanup:\n%s", script)
+	}
+	if !strings.Contains(script, "trap - EXIT") {
+		t.Fatalf("bootstrap missing EXIT trap clearing:\n%s", script)
+	}
+	if !strings.Contains(script, "assets/abc123") {
+		t.Fatalf("bootstrap missing blob key:\n%s", script)
+	}
+	if !strings.Contains(script, "\"$_action\" \"$_blob_stage/$_blob_key\" \"$_target\"") {
+		t.Fatalf("bootstrap missing blob placement loop:\n%s", script)
+	}
+	if !strings.Contains(script, "mv\tassets/abc123\t/workspace/project/data/training.pkl") {
+		t.Fatalf("bootstrap missing mv target path:\n%s", script)
 	}
 	if !strings.Contains(script, `sha256sum -c -`) {
 		t.Fatalf("bootstrap missing blob SHA-256 verification:\n%s", script)
 	}
-	copyAt := strings.Index(script, blobCopy)
+	// Fallback per-blob download must be present
+	if !strings.Contains(script, `rclone copyto "r2:$R2_BUCKET/$_blob_key" "$_blob_stage/$_blob_key"`) {
+		t.Fatalf("bootstrap missing fallback blob download:\n%s", script)
+	}
+	copyAt := strings.Index(script, batchCopy)
 	startAt := strings.LastIndex(script, "weft-agent run-instance")
 	if copyAt < 0 || startAt < 0 || copyAt > startAt {
 		t.Fatalf("blob materialization must precede agent start (copy=%d start=%d)", copyAt, startAt)
+	}
+}
+
+func TestBootstrapBatchesMultipleSourceBlobsAndDeduplicatesKeys(t *testing.T) {
+	hashA := strings.Repeat("a", 64)
+	hashB := strings.Repeat("b", 64)
+	script := GenerateBootstrapScript(BootstrapManifest{
+		AgentR2Key: "agents/v2/linux-amd64",
+		Sources: []SourceMapping{{
+			R2Key: "sources/source.tar.gz", RemoteDir: "/workspace/project",
+			Blobs: []dataplane.SourceBlob{
+				{R2Key: "assets/blob1", RelPath: "data/file1.bin", SHA256: hashA},
+				{R2Key: "assets/blob1", RelPath: "data/file1_copy.bin", SHA256: hashA},
+				{R2Key: "assets/blob2", RelPath: "data/file2.bin", SHA256: hashB},
+			},
+		}},
+	})
+
+	// Check files-from list contains unique keys
+	filesFromSection := script[strings.Index(script, "files-from.txt"):strings.Index(script, "if ! rclone copy")]
+	if strings.Count(filesFromSection, "assets/blob1") != 1 {
+		t.Fatalf("files-from.txt should deduplicate blob keys, got:\n%s", filesFromSection)
+	}
+	if strings.Count(filesFromSection, "assets/blob2") != 1 {
+		t.Fatalf("files-from.txt missing blob2, got:\n%s", filesFromSection)
+	}
+
+	// Check placement maps all 3 targets: earlier duplicate uses cp, final uses mv
+	if !strings.Contains(script, "cp\tassets/blob1\t/workspace/project/data/file1.bin") {
+		t.Fatalf("missing target file1.bin (cp) in script:\n%s", script)
+	}
+	if !strings.Contains(script, "mv\tassets/blob1\t/workspace/project/data/file1_copy.bin") {
+		t.Fatalf("missing target file1_copy.bin (mv) in script:\n%s", script)
+	}
+	if !strings.Contains(script, "mv\tassets/blob2\t/workspace/project/data/file2.bin") {
+		t.Fatalf("missing target file2.bin (mv) in script:\n%s", script)
+	}
+
+	// Check sha256sum verifies all 3 targets
+	if !strings.Contains(script, fmt.Sprintf("%s  /workspace/project/data/file1.bin", hashA)) {
+		t.Fatalf("missing checksum for file1.bin:\n%s", script)
+	}
+	if !strings.Contains(script, fmt.Sprintf("%s  /workspace/project/data/file1_copy.bin", hashA)) {
+		t.Fatalf("missing checksum for file1_copy.bin:\n%s", script)
+	}
+	if !strings.Contains(script, fmt.Sprintf("%s  /workspace/project/data/file2.bin", hashB)) {
+		t.Fatalf("missing checksum for file2.bin:\n%s", script)
 	}
 }
 
