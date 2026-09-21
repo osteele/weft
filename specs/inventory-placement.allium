@@ -899,7 +899,7 @@ contract ConstraintSystemCoverage {
 -- GPU memory floor (wb130); each was a path re-binding without a full
 -- eligibility pass.
 contract BindingPathsAreExhaustive {
-    -- The binding paths and their implementations:
+    -- The eight binding paths and their implementations:
         --   submit: job-lifecycle PlaceJob calls SelectBestHost here
         --   cloud_spill: PlaceWithFallback's spill branch (control passes
         --     to campaign-lifecycle's launch workflow)
@@ -912,7 +912,9 @@ contract BindingPathsAreExhaustive {
         --   retry / replan: job-lifecycle re-placement, re-entering
         --     evaluation with constraints assembled at that decision
         --   explicit_host: ExplicitHostBypassesPolicyNotCompatibility
-        -- A ninth path that writes jobs.host or claims an instance without
+        --   job_move: job-move.allium (moving a placed job to another host
+        --     is a re-binding and re-enters evaluation)
+        -- A path that writes jobs.host or claims an instance without
         -- routing through evaluation violates this contract. The coverage
         -- test counterpart should enumerate these paths the way
         -- TestConstraintSystemCoverage enumerates axes.
@@ -1006,9 +1008,11 @@ rule EvaluateEligibility {
     -- error output.
 
     -- 0a. Cordoned targets take no new auto-placed work. (weft instance
-    --     cordon / host-level cordon; an explicit --host may override this
-    --     POLICY gate with an audit event — see
-    --     ExplicitHostBypassesPolicyNotCompatibility.)
+    --     cordon / host-level cordon.) The explicitly_named exception below
+    --     scopes the override to operator-forced --host targeting and is
+    --     audited; auto-placed work (including campaign-lifecycle's
+    --     placement pass, which states its own unconditional cordon rule)
+    --     never receives it.
     requires: target.explicitly_named or not target.cordoned
 
     -- 0b. Overloaded hosts are ineligible; merely busy hosts stay eligible
@@ -1290,11 +1294,12 @@ rule ExplicitHostBypassesPolicyNotCompatibility {
     if host.cordoned or host.load.state = overloaded or host.opt_in_only:
         ensures: PolicyOverrideAudited(job, host)
 
-    -- The PolicyOverrideAudited event is produced by the CLI explicit-host
-    -- path (cmd/run.go --host handling): the submission emits the audit
-    -- event naming the job, host, and operator before the assignment is
-    -- written. Until that emission exists in code, the explicitly_named
-    -- exception must not be honored on cordoned or overloaded targets.
+    -- legacy annotation: @guidance
+        -- PolicyOverrideAudited is produced by the CLI explicit-host path
+        -- (cmd/run.go --host handling): the submission emits the audit
+        -- event naming the job, host, and operator before the assignment is
+        -- written. Until that emission exists in code, the explicitly_named
+        -- exception must not be honored on cordoned or overloaded targets.
 }
 
 -- =========================================================================
