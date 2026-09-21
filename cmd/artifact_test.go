@@ -1978,6 +1978,37 @@ func TestSyncArtifactsForJobFallsBackToDeclaredOutputFilesWhenManifestDirectoryS
 	}
 }
 
+func TestDiscoverLocalJobOutputFilesIncludesProducesWithoutManifest(t *testing.T) {
+	workDir := t.TempDir()
+	const rel = ".agent-execution/results/detached.json"
+	fullPath := filepath.Join(workDir, rel)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullPath, []byte(`{"status":"completed"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	job := &db.Job{Produces: []string{rel + ":8150"}}
+	files, err := discoverLocalJobOutputFiles(job, workDir, now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].RelPath != rel {
+		t.Fatalf("discovered outputs = %+v, want %s", files, rel)
+	}
+	if err := os.Chtimes(fullPath, now.Add(time.Hour), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	files, err = discoverLocalJobOutputFiles(job, workDir, now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("attributed a post-attempt overwrite: %+v", files)
+	}
+}
+
 func TestSyncCloudJobArtifactsWithStore_FallsBackToRunZeroManifest(t *testing.T) {
 	database := db.SetupTestDB(t)
 	home := t.TempDir()
@@ -2030,6 +2061,726 @@ func TestSyncCloudJobArtifactsWithStore_FallsBackToRunZeroManifest(t *testing.T)
 	}
 	if entry.Path != "results/metrics.json" {
 		t.Fatalf("path = %q, want results/metrics.json", entry.Path)
+	}
+}
+
+func TestSyncCloudJobArtifactsWithStore_OutsideConventionOutputDir(t *testing.T) {
+	database := db.SetupTestDB(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobProduces(database, jobID, []string{".agent-execution/results/worker-result.json:worker-result"}); err != nil {
+		t.Fatalf("SetJobProduces: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusCompleted); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LatestRunID == nil || *job.LatestRunID == 0 {
+		t.Fatalf("latest_run_id = %v, want non-zero", job.LatestRunID)
+	}
+	runID := *job.LatestRunID
+
+	manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, runID)
+	const relPath = ".agent-execution/results/worker-result.json"
+	outputKey := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + relPath
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			manifestKey: []byte(`{"artifacts":[{"name":"worker-result","path":"` + relPath + `"}]}`),
+			outputKey:   []byte(`{"result":"ok"}`),
+		},
+	}
+
+	result, err := syncCloudJobArtifactsWithStore(database, store, job)
+	if err != nil {
+		t.Fatalf("syncCloudJobArtifactsWithStore: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("added = %d, want 1", result.Added)
+	}
+
+	entry, err := db.FindArtifactByNameOrPath(database, job.ID, relPath)
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+	if entry.Path != relPath {
+		t.Fatalf("entry.Path = %q, want %q", entry.Path, relPath)
+	}
+	if entry.Name != "worker-result" {
+		t.Fatalf("entry.Name = %q, want worker-result", entry.Name)
+	}
+
+	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+	if err != nil {
+		t.Fatalf("LocalPathFromStored: %v", err)
+	}
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != `{"result":"ok"}` {
+		t.Fatalf("content = %q, want {\"result\":\"ok\"}", string(data))
+	}
+}
+
+func TestSyncCloudJobArtifactsWithStore_RecordedAttemptPublicationKey(t *testing.T) {
+	database := db.SetupTestDB(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	attemptID, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusCompleted)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	runID := *job.LatestRunID
+
+	manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, runID)
+	const relPath = ".agent-execution/results/worker-result.json"
+	customPayloadKey := fmt.Sprintf("jobs/%d/runs/%d/custom-payloads/worker-result.json", job.ID, runID)
+
+	_, err = database.Exec(`
+		INSERT INTO attempt_publication_artifacts
+			(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
+		VALUES (?, ?, ?, 'ready', ?, ?, '', 1)`,
+		attemptID, "worker-result", relPath, time.Now().Unix(), customPayloadKey)
+	if err != nil {
+		t.Fatalf("insert attempt_publication_artifacts: %v", err)
+	}
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			manifestKey:      []byte(`{"artifacts":[{"name":"worker-result","path":"` + relPath + `"}]}`),
+			customPayloadKey: []byte(`{"custom":"payload"}`),
+		},
+	}
+
+	result, err := syncCloudJobArtifactsWithStore(database, store, job)
+	if err != nil {
+		t.Fatalf("syncCloudJobArtifactsWithStore: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("added = %d, want 1", result.Added)
+	}
+
+	entry, err := db.FindArtifactByNameOrPath(database, job.ID, "worker-result")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+	if err != nil {
+		t.Fatalf("LocalPathFromStored: %v", err)
+	}
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != `{"custom":"payload"}` {
+		t.Fatalf("content = %q, want {\"custom\":\"payload\"}", string(data))
+	}
+}
+
+func TestDeliverArtifactToken_FastPath_DirectCloudArtifactAndCachesLocally(t *testing.T) {
+	database := db.SetupTestDB(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	const relPath = ".agent-execution/results/worker-result.json"
+	if err := db.SetJobProduces(database, jobID, []string{relPath}); err != nil {
+		t.Fatalf("SetJobProduces: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusCompleted); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	runID := *job.LatestRunID
+
+	cloudKey := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + relPath
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			cloudKey: []byte(`{"worker":"done"}`),
+		},
+		listErr: errors.New("listings disabled: test must use fast-path ObjectExists probe"),
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	// Verify database initially has NO artifact record for this job
+	if _, err := db.FindArtifactByNameOrPath(database, job.ID, relPath); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows before delivery, got %v", err)
+	}
+
+	// 1. Stream retrieval (e.g. `weft artifact cat`)
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	if err := deliverArtifactToken(cmd, database, job.ID, job, relPath, false, true); err != nil {
+		t.Fatalf("deliverArtifactToken stream: %v", err)
+	}
+	if got := out.String(); got != `{"worker":"done"}` {
+		t.Fatalf("stdout = %q, want {\"worker\":\"done\"}", got)
+	}
+
+	// Verify that delivery cached it into database and filesystem
+	entry, err := db.FindArtifactByNameOrPath(database, job.ID, relPath)
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath after stream: %v", err)
+	}
+	if entry.Path != relPath {
+		t.Fatalf("entry.Path = %q, want %q", entry.Path, relPath)
+	}
+	if entry.JobRunID == nil || *entry.JobRunID != runID {
+		t.Fatalf("entry.JobRunID = %v, want %d", entry.JobRunID, runID)
+	}
+	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+	if err != nil {
+		t.Fatalf("LocalPathFromStored: %v", err)
+	}
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("ReadFile from local cache: %v", err)
+	}
+	if string(data) != `{"worker":"done"}` {
+		t.Fatalf("cached file content = %q", string(data))
+	}
+
+	// Now sever R2 client (simulate offline / R2 unconfigured)
+	buildArtifactR2Client = func() cloudOutputStore { return nil }
+
+	// Subsequent retrieval should succeed immediately from local cache!
+	out.Reset()
+	if err := deliverArtifactToken(cmd, database, job.ID, job, relPath, false, true); err != nil {
+		t.Fatalf("deliverArtifactToken from cache: %v", err)
+	}
+	if got := out.String(); got != `{"worker":"done"}` {
+		t.Fatalf("stdout from cache = %q, want {\"worker\":\"done\"}", got)
+	}
+}
+
+func TestDeliverArtifactToken_FastPath_AttemptPublicationKey(t *testing.T) {
+	database := db.SetupTestDB(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Create Job 1 with an attempt so attempt IDs advance past attempt_numbers (wb139 regression)
+	job1ID, err := db.RecordQueued(database, "", "/tmp/project1", "echo job1", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued job1: %v", err)
+	}
+	instance1ID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch job1: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, job1ID, instance1ID); err != nil {
+		t.Fatalf("SetJobLaunchID job1: %v", err)
+	}
+	_, err = db.CreateAttempt(database, job1ID, "vastai:11111", &instance1ID, db.StatusCompleted)
+	if err != nil {
+		t.Fatalf("CreateAttempt job1: %v", err)
+	}
+
+	// Create Job 2 whose attempt_number is 1 but attempt ID is 2
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	attemptID, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusCompleted)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	if attemptID == 1 {
+		t.Fatalf("expected attemptID > 1 for job 2, got %d", attemptID)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	runID := *job.LatestRunID
+	if runID != attemptID {
+		t.Fatalf("expected runID == attemptID (%d), got %d", attemptID, runID)
+	}
+
+	const relPath = ".agent-execution/results/worker-result.json"
+	customKey := fmt.Sprintf("jobs/%d/runs/%d/custom-out/result.json", job.ID, runID)
+
+	_, err = database.Exec(`
+		INSERT INTO attempt_publication_artifacts
+			(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
+		VALUES (?, ?, ?, 'ready', ?, ?, '', 1)`,
+		attemptID, "worker-result", relPath, time.Now().Unix(), customKey)
+	if err != nil {
+		t.Fatalf("insert attempt_publication_artifacts: %v", err)
+	}
+
+	// Probe recordedAttemptPublicationArtifact directly:
+	// A runID query for job 2 using the true attempt id (runID) must succeed and return ja.id.
+	directMatch := recordedAttemptPublicationArtifact(database, job.ID, runID, relPath, "worker-result")
+	if directMatch.RunID != runID {
+		t.Fatalf("directMatch.RunID = %d, want %d (should match ja.id, not attempt_number)", directMatch.RunID, runID)
+	}
+	// Querying with runID=1 (which is attempt_number, not ja.id for job 2) must NOT match.
+	wrongRunMatch := recordedAttemptPublicationArtifact(database, job.ID, 1, relPath, "worker-result")
+	if wrongRunMatch.PayloadKey != "" {
+		t.Fatalf("wrongRunMatch should not have matched attempt_number 1 when runID is 1 for job 2")
+	}
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			customKey: []byte(`{"custom":"fastpath"}`),
+		},
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	// Download to destination file (e.g. `weft artifact get`)
+	dest := filepath.Join(t.TempDir(), "downloaded-result.json")
+	oldOutput := artifactOutput
+	artifactOutput = dest
+	t.Cleanup(func() { artifactOutput = oldOutput })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "worker-result", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken: %v", err)
+	}
+	if !strings.Contains(out.String(), "Wrote ") {
+		t.Fatalf("output = %q, want 'Wrote ...'", out.String())
+	}
+
+	destData, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(destData) != `{"custom":"fastpath"}` {
+		t.Fatalf("dest data = %q, want custom fastpath", string(destData))
+	}
+
+	// Verify local cache row was added with correct Name, Path, and JobRunID
+	entry, err := db.FindArtifactByNameOrPath(database, job.ID, "worker-result")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath by name: %v", err)
+	}
+	if entry.Name != "worker-result" {
+		t.Fatalf("entry.Name = %q, want worker-result", entry.Name)
+	}
+	if entry.Path != relPath {
+		t.Fatalf("entry.Path = %q, want %q", entry.Path, relPath)
+	}
+	if entry.JobRunID == nil || *entry.JobRunID != runID {
+		t.Fatalf("entry.JobRunID = %v, want %d", entry.JobRunID, runID)
+	}
+	// Looking up by true path must also find the row
+	if _, err := db.FindArtifactByNameOrPath(database, job.ID, relPath); err != nil {
+		t.Fatalf("FindArtifactByNameOrPath by path: %v", err)
+	}
+	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+	if err != nil {
+		t.Fatalf("LocalPathFromStored: %v", err)
+	}
+	cacheData, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+	if string(cacheData) != `{"custom":"fastpath"}` {
+		t.Fatalf("cache data = %q", string(cacheData))
+	}
+
+	// Verify Job 1 is completely unaffected by Job 2's artifact delivery
+	job1Artifacts, err := db.ListArtifactsByJob(database, job1ID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByJob job1: %v", err)
+	}
+	if len(job1Artifacts) != 0 {
+		t.Fatalf("job 1 artifact list got %d rows, want 0 (cross-job attribution bug)", len(job1Artifacts))
+	}
+	if _, err := db.FindArtifactByNameOrPath(database, job1ID, "worker-result"); err == nil {
+		t.Fatalf("FindArtifactByNameOrPath on job 1 found job 2's artifact")
+	}
+
+	// Delivering with default output (no -o flag) must write to filepath.Base(relPath),
+	// i.e. "worker-result.json", NOT the token name "worker-result".
+	targetDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(targetDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	artifactOutput = ""
+	out.Reset()
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "worker-result", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken with default output: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "worker-result.json")); err != nil {
+		t.Fatalf("expected worker-result.json to be written in targetDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "worker-result")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worker-result (without extension) should not have been written")
+	}
+}
+
+func TestDeliverArtifactToken_LiveJob_DoesNotPoisonCacheWithStaleBytes(t *testing.T) {
+	database := db.SetupTestDB(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python train.py", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	// Create running attempt (status=running, end_time=nil)
+	attemptID, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusRunning)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.EndTime != nil {
+		t.Fatalf("expected live job to have EndTime == nil, got %v", *job.EndTime)
+	}
+	runID := *job.LatestRunID
+
+	const relPath = "checkpoint.pt"
+	customKey := fmt.Sprintf("jobs/%d/runs/%d/custom-out/checkpoint.pt", job.ID, runID)
+
+	_, err = database.Exec(`
+		INSERT INTO attempt_publication_artifacts
+			(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
+		VALUES (?, ?, ?, 'ready', ?, ?, '', 1)`,
+		attemptID, "checkpoint", relPath, time.Now().Unix(), customKey)
+	if err != nil {
+		t.Fatalf("insert attempt_publication_artifacts: %v", err)
+	}
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			customKey: []byte("checkpoint-step-100"),
+		},
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	dest := filepath.Join(t.TempDir(), "checkpoint.pt")
+	oldOutput := artifactOutput
+	artifactOutput = dest
+	t.Cleanup(func() { artifactOutput = oldOutput })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	// First delivery: retrieves initial bytes
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "checkpoint", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken #1: %v", err)
+	}
+	data1, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest #1: %v", err)
+	}
+	if string(data1) != "checkpoint-step-100" {
+		t.Fatalf("got %q, want checkpoint-step-100", string(data1))
+	}
+
+	// Live job must NOT populate the SQLite artifact cache
+	if entry, err := db.FindArtifactByNameOrPath(database, job.ID, "checkpoint"); err == nil {
+		t.Fatalf("live job should not have populated cache entry in DB: %+v", entry)
+	}
+
+	// Update the cloud object with new bytes (as happens during checkpointing in a live job)
+	store.objects[customKey] = []byte("checkpoint-step-200")
+
+	// Second delivery: must return the updated cloud bytes, not stale initial bytes
+	out.Reset()
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "checkpoint", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken #2: %v", err)
+	}
+	data2, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest #2: %v", err)
+	}
+	if string(data2) != "checkpoint-step-200" {
+		t.Fatalf("got %q, want updated bytes checkpoint-step-200 (cache was poisoned)", string(data2))
+	}
+
+	// Even if an older cached row exists, live job must bypass it and re-check cloud
+	localRoot, err := artifacts.LocalArtifactsDir()
+	if err != nil {
+		t.Fatalf("LocalArtifactsDir: %v", err)
+	}
+	storedPath := artifacts.LocalStoredPath(job.ID, relPath)
+	localPath := filepath.Join(localRoot, storedPath)
+	_ = os.MkdirAll(filepath.Dir(localPath), 0o755)
+	_ = os.WriteFile(localPath, []byte("stale-cached-bytes"), 0o644)
+	_ = db.UpsertArtifact(database, db.Artifact{
+		JobID:      job.ID,
+		JobRunID:   &runID,
+		Name:       "checkpoint",
+		Path:       relPath,
+		StoredPath: storedPath,
+		SizeBytes:  int64(len("stale-cached-bytes")),
+		SHA256:     "fake",
+		CreatedAt:  time.Now().Unix(),
+	})
+
+	store.objects[customKey] = []byte("checkpoint-step-300")
+	out.Reset()
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "checkpoint", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken #3: %v", err)
+	}
+	data3, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read dest #3: %v", err)
+	}
+	if string(data3) != "checkpoint-step-300" {
+		t.Fatalf("got %q, want checkpoint-step-300 (failed to yield stale cached entry)", string(data3))
+	}
+}
+
+func TestDeliverArtifactToken_UserEditDoesNotCorruptCache(t *testing.T) {
+	database := db.SetupTestDB(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	attemptID, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusCompleted)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	runID := *job.LatestRunID
+
+	const relPath = "model.bin"
+	customKey := fmt.Sprintf("jobs/%d/runs/%d/custom-out/model.bin", job.ID, runID)
+	_, err = database.Exec(`
+		INSERT INTO attempt_publication_artifacts
+			(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
+		VALUES (?, ?, ?, 'ready', ?, ?, '', 1)`,
+		attemptID, "model", relPath, time.Now().Unix(), customKey)
+	if err != nil {
+		t.Fatalf("insert attempt_publication_artifacts: %v", err)
+	}
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			customKey: []byte("original-model-weights"),
+		},
+	}
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	dest := filepath.Join(t.TempDir(), "model.bin")
+	oldOutput := artifactOutput
+	artifactOutput = dest
+	t.Cleanup(func() { artifactOutput = oldOutput })
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "model", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken: %v", err)
+	}
+
+	entry, err := db.FindArtifactByNameOrPath(database, job.ID, "model")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+	if err != nil {
+		t.Fatalf("LocalPathFromStored: %v", err)
+	}
+
+	// User modifies the delivered file
+	if err := os.WriteFile(dest, []byte("tampered-user-edits"), 0o644); err != nil {
+		t.Fatalf("write tampered: %v", err)
+	}
+
+	// The cached file must remain intact and NOT be hard-linked to dest
+	cachedData, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read cachedData: %v", err)
+	}
+	if string(cachedData) != "original-model-weights" {
+		t.Fatalf("cached file was corrupted by edit to delivered file: got %q, want original-model-weights", string(cachedData))
+	}
+}
+
+func TestDeliverArtifactToken_CatOver100MB_StreamsDirectly(t *testing.T) {
+	database := db.SetupTestDB(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	attemptID, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusCompleted)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	runID := *job.LatestRunID
+
+	const relPath = "large.bin"
+	customKey := fmt.Sprintf("jobs/%d/runs/%d/custom-out/large.bin", job.ID, runID)
+	_, err = database.Exec(`
+		INSERT INTO attempt_publication_artifacts
+			(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
+		VALUES (?, ?, ?, 'ready', ?, ?, '', 1)`,
+		attemptID, "large", relPath, time.Now().Unix(), customKey)
+	if err != nil {
+		t.Fatalf("insert attempt_publication_artifacts: %v", err)
+	}
+
+	payload := []byte("large-content-streamed-directly")
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			customKey: payload,
+		},
+	}
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	// Pre-create an existing cached file
+	localRoot, err := artifacts.LocalArtifactsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedPath := artifacts.LocalStoredPath(job.ID, relPath)
+	localCachePath := filepath.Join(localRoot, storedPath)
+	_ = os.MkdirAll(filepath.Dir(localCachePath), 0o755)
+	_ = os.WriteFile(localCachePath, []byte("pre-existing-cache"), 0o644)
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	// Stream cat with known size > 100MB
+	art := resolvedArtifact{
+		Name:      "large",
+		RelPath:   relPath,
+		Source:    artifactSourceCloud,
+		SizeBytes: 200 << 20, // 200 MB
+		cloudFile: &runner.OutputFile{
+			RelPath:   relPath,
+			R2Key:     customKey,
+			SizeBytes: 200 << 20,
+		},
+	}
+	if err := deliverCloudArtifactAndCache(cmd, database, store, job, art, "-"); err != nil {
+		t.Fatalf("deliverCloudArtifactAndCache cat: %v", err)
+	}
+	if out.String() != string(payload) {
+		t.Fatalf("cat stdout = %q, want %q", out.String(), string(payload))
+	}
+
+	// Pre-existing cache must NOT have been deleted
+	survivedData, err := os.ReadFile(localCachePath)
+	if err != nil {
+		t.Fatalf("pre-existing cache was deleted by large cat: %v", err)
+	}
+	if string(survivedData) != "pre-existing-cache" {
+		t.Fatalf("pre-existing cache was altered: %q", string(survivedData))
 	}
 }
 

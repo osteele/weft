@@ -57,6 +57,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Recovered review results**: Inventory recovery republishes declared
   `.agent-execution` result files through the attempt-scoped output boundary
   after waiter loss without re-executing the worker command.
+- **Declared artifacts after runner restart**: Persist `--produces` declarations
+  before execution and recover their manifests and completion-file listings.
+  Artifact retrieval includes declared paths outside `output/` and `outputs/`
+  when a manifest is missing, while retaining attempt-window checks.
+  Fast-path direct cloud retrieval and local SQLite/filesystem artifact caching
+  prevent automated retrieval timeouts (e.g. from detached review waiters).
+  Scripts can append artifact paths to pre-registered JSON manifests.
 - **Bounded cloud completion sync**: Routine sync retries incomplete terminal
   completion metadata for 24 hours after a launch ends. Older rows remain
   eligible for the explicit historical R2 repair sweep without consuming every

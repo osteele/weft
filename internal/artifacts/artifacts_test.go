@@ -64,6 +64,19 @@ func TestParseManifestPlainTextBlankLines(t *testing.T) {
 	}
 }
 
+func TestParseManifestRejectsMalformedJSONAndInlineSuffix(t *testing.T) {
+	for name, content := range map[string]string{
+		"unfinished object": `{"artifacts":[]` + "\nreported.txt\n",
+		"inline suffix":     `{"artifacts":[]}reported.txt`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseManifest(content, 42); err == nil {
+				t.Fatal("invalid JSON manifest accepted as script-reported paths")
+			}
+		})
+	}
+}
+
 func TestLocalRelativePath(t *testing.T) {
 	cases := map[string]string{
 		"output/results.json":   "output/results.json",

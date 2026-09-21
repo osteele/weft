@@ -681,6 +681,14 @@ in the completion record and syncs them back:
   timeout scales with payload size at a 1 MB/s floor (5-minute minimum), so
   multi-GB checkpoints are supported.
 
+Use `--produces PATH` for a result outside the configured output directories,
+including hidden paths such as `.agent-execution/results/call-id.json`.
+The runner persists declarations before execution and includes their files in
+successful completion records, including completion recovered after a restart.
+If a manifest is missing, `weft artifact sync` discovers declared paths in the
+recorded runtime directory within the attempt's time window. A result can then
+be retrieved by job ID after the submitting process exits.
+
 Customize output directories, cloud image, and project-specific source
 excludes in `.weft.toml`:
 

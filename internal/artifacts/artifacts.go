@@ -90,8 +90,8 @@ type ArtifactSpec struct {
 // ErrManifestMissing is returned when no manifest is found.
 var ErrManifestMissing = errors.New("artifact manifest not found")
 
-// ParseManifest parses manifest content. It accepts JSON format or plain-text
-// (one file path per line) for scripts that append paths to $WEFT_ARTIFACT_MANIFEST.
+// ParseManifest accepts JSON, newline-separated paths, or a JSON object followed
+// by paths appended on separate lines to $WEFT_ARTIFACT_MANIFEST.
 func ParseManifest(content string, fallbackJobID int64) (Manifest, error) {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
@@ -100,17 +100,27 @@ func ParseManifest(content string, fallbackJobID int64) (Manifest, error) {
 
 	var manifest Manifest
 	if trimmed[0] == '{' {
-		if err := json.Unmarshal([]byte(content), &manifest); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(trimmed))
+		if err := decoder.Decode(&manifest); err != nil {
 			return Manifest{}, err
 		}
 		if manifest.JobID == 0 {
 			manifest.JobID = fallbackJobID
 		}
-		return manifest, nil
+		trimmed = trimmed[decoder.InputOffset():]
+		if trimmed == "" {
+			return manifest, nil
+		}
+		newline := strings.IndexByte(trimmed, '\n')
+		if newline < 0 || strings.TrimSpace(trimmed[:newline]) != "" {
+			return Manifest{}, fmt.Errorf("appended artifact paths must start on a new line")
+		}
+		trimmed = trimmed[newline+1:]
+	} else {
+		manifest.JobID = fallbackJobID
 	}
 
-	// Plain-text format: one path per line
-	manifest = Manifest{JobID: fallbackJobID}
+	// Plain-text paths, either the whole manifest or appended after JSON.
 	for _, line := range strings.Split(trimmed, "\n") {
 		p := strings.TrimSpace(line)
 		if p == "" {

@@ -223,6 +223,41 @@ assert paths == expected, f"manifest paths = {paths!r}, want {expected!r}"
 	}
 }
 
+func TestRunSingleJob_AppendedArtifactsSurviveDeclaredManifest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const jobID int64 = 7778
+	cfg := SingleJobConfig{
+		JobID: jobID,
+		Job: opsqueue.CommandJob{
+			Cmd: `printf declared > declared.txt
+printf dynamic > reported.txt
+printf '%s\n' reported.txt >> "$WEFT_ARTIFACT_MANIFEST"`,
+			Produces: []string{"declared.txt"},
+		},
+		LogDir:         t.TempDir(),
+		WorkingDir:     t.TempDir(),
+		SampleInterval: 100 * time.Millisecond,
+		SkipProbes:     true,
+	}
+	exit, err := RunSingleJob(cfg)
+	if err != nil || exit.ExitCode != 0 {
+		t.Fatalf("RunSingleJob: exit=%+v, error=%v", exit, err)
+	}
+	manifestPath := filepath.Join(home, ".cache", "weft", "artifacts", "7778.json")
+	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make(map[string]bool, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		paths[artifact.Path] = true
+	}
+	if !paths["declared.txt"] || !paths["reported.txt"] {
+		t.Fatalf("declared or script-reported artifact lost: %+v", manifest.Artifacts)
+	}
+}
+
 func TestRecordProducedArtifacts_MergesExistingManifest(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

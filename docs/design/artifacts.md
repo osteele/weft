@@ -32,6 +32,9 @@ the host at `~/.cache/weft/artifacts/<jobID>.json` (`$WEFT_ARTIFACT_MANIFEST`,
 which job scripts may also append to directly). Declared outputs are
 registered automatically at job start and again post-exit
 (`ProducesPreRegisteredAtJobStart` in the spec).
+The manifest accepts JSON, one path per line, or a JSON object followed by
+paths on separate lines. Scripts may append paths to a pre-registered JSON
+manifest; the post-exit merge preserves both declared and appended entries.
 
 **Producer / consumer** — a consumer job declares `--needs <path>:<job-id>`;
 weft must materialize the producer's artifact on the consumer's host before

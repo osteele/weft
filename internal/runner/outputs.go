@@ -99,6 +99,22 @@ func FilesystemOutputRefPath(ref string) (string, bool) {
 	return ref, true
 }
 
+// DeclaredOutputRefs combines --output references with the filesystem paths
+// in --produces specifications, whose optional versions are not path components.
+func DeclaredOutputRefs(outputs, produces []string) []string {
+	if len(produces) == 0 {
+		return outputs
+	}
+	refs := make([]string, len(outputs), len(outputs)+len(produces))
+	copy(refs, outputs)
+	for _, raw := range produces {
+		if path := strings.TrimSpace(ParseProducesSpec(raw).Path); path != "" {
+			refs = append(refs, "local:"+path)
+		}
+	}
+	return refs
+}
+
 // DiscoverJobOutputs discovers convention directories and declared filesystem
 // output references for a job.
 func DiscoverJobOutputs(workDir string, dirs, refs []string) ([]OutputFile, error) {
