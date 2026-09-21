@@ -115,3 +115,9 @@ binaries directory.
 
 Without `WEFT_FLY_BUILDER_APP`/`MACHINE`, the linux/amd64 agent is skipped with
 an info message. Without `WEFT_MACOS_BUILDER_HOST`, darwin/arm64 is built locally.
+
+These variables may also live in `~/.config/weft/fly-builder.env` (simple
+`KEY=VALUE` lines), which every weft process reads regardless of working
+directory — the recommended home for builder config since installs and the
+daemon do not run from a direnv-enabled checkout. Precedence: process
+environment > repo `.envrc`/`.env` > this file.

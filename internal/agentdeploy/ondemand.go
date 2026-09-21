@@ -79,7 +79,7 @@ func buildOnDemand(version, goos, goarch, outputPath string, output io.Writer, o
 		return err
 	}
 	if len(builders) == 0 {
-		return fmt.Errorf("%w for %s/%s: no builders configured in ~/.config/weft/config.toml [agent_build] and no WEFT_* fallback vars found",
+		return fmt.Errorf("%w for %s/%s: no builders configured in ~/.config/weft/config.toml [agent_build] and no WEFT_* fallback vars found in the environment, the repo .envrc/.env, or ~/.config/weft/fly-builder.env",
 			ErrAgentNotAvailable, goos, goarch)
 	}
 
