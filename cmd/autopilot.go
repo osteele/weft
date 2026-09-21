@@ -197,6 +197,8 @@ type autopilotStateView struct {
 	ActiveRunnerLabel  string               `json:"active_runner_label,omitempty"`
 	ActiveRunnerHost   string               `json:"active_runner_host,omitempty"`
 	ActiveBinaryPath   string               `json:"active_binary_path,omitempty"`
+	ActiveBinaryMtime  string               `json:"active_binary_mtime,omitempty"`
+	ActiveBinarySize   int64                `json:"active_binary_size,omitempty"`
 	ActiveBinaryStale  bool                 `json:"active_binary_stale,omitempty"`
 	PassStartedAt      *string              `json:"pass_started_at,omitempty"`
 	PassAgeSeconds     int64                `json:"pass_age_seconds,omitempty"`
@@ -250,6 +252,10 @@ func buildAutopilotStateView(state *db.AutopilotState) autopilotStateView {
 	view.ActiveRunnerLabel = state.ActiveRunnerLabel
 	view.ActiveRunnerHost = state.ActiveRunnerHost
 	view.ActiveBinaryPath = state.ActiveBinary.Path
+	if state.ActiveBinary.ModTimeUnix != 0 {
+		view.ActiveBinaryMtime = time.Unix(state.ActiveBinary.ModTimeUnix, 0).UTC().Format(time.RFC3339)
+		view.ActiveBinarySize = state.ActiveBinary.Size
+	}
 	view.LastPassDurationMS = state.LastPassDurationMS
 	view.LastPassSummary = state.LastPassSummary
 	view.LastPassError = state.LastPassError
@@ -384,7 +390,14 @@ func formatAutopilotStatusText(view autopilotStateView) string {
 			db.FormatDuration(view.PassAgeSeconds))
 	case stateStale:
 		if view.ActiveBinaryStale {
-			fmt.Fprint(&b, "autopilot: STALE — autopilot is running an old weft binary; restart it")
+			// Name the holder: a bare "restart it" sent operators hunting
+			// for a process the message never identified, and the mismatch
+			// then persisted for days (wb165).
+			fmt.Fprintf(&b, "autopilot: STALE — the pass claim is held by pid %d (%s on %s) for binary %s", view.ActiveRunnerPID, view.ActiveRunnerLabel, view.ActiveRunnerHost, view.ActiveBinaryPath)
+			if view.ActiveBinarySize > 0 && view.ActiveBinaryMtime != "" {
+				fmt.Fprintf(&b, " (size %d, published %s)", view.ActiveBinarySize, view.ActiveBinaryMtime)
+			}
+			fmt.Fprint(&b, ", which no longer matches the on-disk binary; restart that process to release the claim")
 		} else {
 			fmt.Fprintf(&b, "autopilot: STALE — pass claim is %s old (>%ds) and will be reclaimed",
 				db.FormatDuration(view.HeartbeatAgeS),

@@ -1939,6 +1939,9 @@ func renderJobInfoFromLedger(w, errW io.Writer, database *sql.DB, job *db.Job) e
 	}
 	if reason := humanizeFailureReason(job.FailureReason); reason != "" {
 		fmt.Fprintf(w, "Reason:      %s\n", reason)
+		if cause := dispatchFailureCause(database, job); cause != "" {
+			fmt.Fprintf(w, "Cause:       %s\n", cause)
+		}
 	}
 	if hint := driverFloorSatisfiedHint(database, job); hint != "" {
 		fmt.Fprint(w, hint)

@@ -22,6 +22,12 @@ type JobMetadata struct {
 	SubmissionNonce  string                     `json:"submission_nonce,omitempty"`
 	BestEffortInputs []string                   `json:"best_effort_inputs,omitempty"`
 	WallTimeSeconds  int                        `json:"wall_time_seconds,omitempty"`
+	// GPUIdleTimeoutSeconds and StdoutSilenceTimeoutSeconds are per-job
+	// hang-watchdog overrides (from [tool.weft] gpu-idle-timeout /
+	// stdout-silence-timeout or the matching weft run flags). nil means the
+	// agent picks by host cost tier; a non-nil zero disables that watchdog.
+	GPUIdleTimeoutSeconds       *int `json:"gpu_idle_timeout_seconds,omitempty"`
+	StdoutSilenceTimeoutSeconds *int `json:"stdout_silence_timeout_seconds,omitempty"`
 }
 
 // JobReconciliationMetadata records durable evidence about an attempt whose

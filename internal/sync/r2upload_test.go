@@ -65,6 +65,10 @@ func (s *countingSourceStore) ObjectExists(ctx context.Context, key string) (boo
 	return ok, nil
 }
 
+func (s *countingSourceStore) PutObjectWithPartProgress(_ context.Context, key string, body io.Reader, contentType string, _ func(int64)) error {
+	return s.PutObject(context.Background(), key, body, contentType)
+}
+
 func (s *countingSourceStore) PutObject(_ context.Context, key string, body io.Reader, _ string) error {
 	data, err := io.ReadAll(body)
 	if err != nil {

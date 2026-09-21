@@ -99,6 +99,57 @@ func parseDurationCap(name, raw string, zeroClears bool) (*int, error) {
 	return &seconds, nil
 }
 
+// parseWatchdogTimeoutOverride parses a per-job hang-watchdog timeout (the
+// --gpu-idle-timeout / --stdout-silence-timeout flags and the matching
+// [tool.weft] keys). Returns nil when raw asks to clear the override
+// ("default", "clear", "auto"); a non-nil zero when raw disables the
+// watchdog ("off" or a zero duration); otherwise the timeout in seconds.
+func parseWatchdogTimeoutOverride(name, raw string) (*int, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" || value == "default" || value == "clear" || value == "auto" {
+		return nil, nil
+	}
+	if value == "off" {
+		zero := 0
+		return &zero, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration < 0 {
+		return nil, fmt.Errorf("--%s must be a non-negative duration or \"off\"", name)
+	}
+	if duration == 0 {
+		zero := 0
+		return &zero, nil
+	}
+	if duration < time.Second {
+		return nil, fmt.Errorf("--%s must be at least 1s", name)
+	}
+	seconds := int(duration / time.Second)
+	return &seconds, nil
+}
+
+// parseWatchdogTimeoutFlag parses a watchdog flag only when the user set it;
+// an unset flag leaves the override undecided so --from and script metadata
+// can supply it.
+func parseWatchdogTimeoutFlag(cmd *cobra.Command, name, raw string) (*int, error) {
+	if !cmd.Flags().Changed(name) {
+		return nil, nil
+	}
+	return parseWatchdogTimeoutOverride(name, raw)
+}
+
+// formatWatchdogTimeoutOverride renders a parsed override for the
+// "Script metadata:" applied-summary line.
+func formatWatchdogTimeoutOverride(seconds *int) string {
+	if seconds == nil {
+		return "default"
+	}
+	if *seconds == 0 {
+		return "off"
+	}
+	return (time.Duration(*seconds) * time.Second).String()
+}
+
 func inheritRentalPolicyOverrides(target, source *db.CLIResourceOverrides) {
 	if target == nil || source == nil {
 		return

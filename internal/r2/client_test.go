@@ -3,14 +3,18 @@ package r2
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -562,6 +566,209 @@ func TestIsPreconditionFailed(t *testing.T) {
 	}
 }
 
+// multipartFake emulates the S3 multipart API over httptest and records how
+// PutObject routed an upload.
+type multipartFake struct {
+	creates          int
+	singlePuts       int
+	completes        int
+	aborts           int
+	createKey        string
+	createType       string
+	partTries        map[int]int
+	partBodies       map[int][]byte
+	completeOrder    []int
+	failFirstTryPart int
+	// onUploadPartStart runs at UploadPart handler entry, onUploadPartBody
+	// after the part body has been consumed; comparing the caller-reader
+	// counts between the two proves the source is read during the transfer
+	// rather than up front. Load/store only: handler goroutines call them.
+	onUploadPartStart atomic.Pointer[func(pn int)]
+	onUploadPartBody  atomic.Pointer[func(pn int)]
+}
+
+func (f *multipartFake) handler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch {
+		case r.Method == http.MethodPost && q.Has("uploads"):
+			f.creates++
+			f.createKey = strings.TrimPrefix(r.URL.Path, "/test-bucket/")
+			f.createType = r.Header.Get("Content-Type")
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<CreateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>test-bucket</Bucket><Key>k</Key><UploadId>upload-1</UploadId>
+</CreateMultipartUploadResult>`)
+		case r.Method == http.MethodPut && q.Has("partNumber"):
+			pn, err := strconv.Atoi(q.Get("partNumber"))
+			if err != nil {
+				t.Errorf("partNumber = %q: %v", q.Get("partNumber"), err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			f.partTries[pn]++
+			if hook := f.onUploadPartStart.Load(); hook != nil {
+				(*hook)(pn)
+			}
+			if f.failFirstTryPart == pn && f.partTries[pn] == 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, `<Error><Code>InternalError</Code><Message>boom</Message></Error>`)
+				return
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read part %d: %v", pn, err)
+			}
+			if hook := f.onUploadPartBody.Load(); hook != nil {
+				(*hook)(pn)
+			}
+			f.partBodies[pn] = body
+			w.Header().Set("ETag", fmt.Sprintf("\"etag-%d\"", pn))
+		case r.Method == http.MethodPost && q.Has("uploadId"):
+			f.completes++
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read complete body: %v", err)
+			}
+			var complete struct {
+				Parts []struct {
+					PartNumber int `xml:"PartNumber"`
+				} `xml:"Part"`
+			}
+			if err := xml.Unmarshal(body, &complete); err != nil {
+				t.Errorf("parse complete body: %v", err)
+			}
+			for _, p := range complete.Parts {
+				f.completeOrder = append(f.completeOrder, p.PartNumber)
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>test-bucket</Bucket><Key>k</Key><ETag>"final"</ETag>
+</CompleteMultipartUploadResult>`)
+		case r.Method == http.MethodDelete && q.Has("uploadId"):
+			f.aborts++
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut:
+			f.singlePuts++
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				t.Errorf("read single-put body: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		}
+	})
+}
+
+func newMultipartTestClient(t *testing.T, fake *multipartFake) *Client {
+	t.Helper()
+	fake.partTries = map[int]int{}
+	fake.partBodies = map[int][]byte{}
+	client := newTestS3Client(t, fake.handler(t))
+	client.multipartThresholdBytes = 64
+	client.multipartPartSizeBytes = 16
+	return client
+}
+
+func multipartPayload(n int) []byte {
+	data := make([]byte, n)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	return data
+}
+
+func (f *multipartFake) reassembled(t *testing.T) []byte {
+	t.Helper()
+	var out []byte
+	for _, pn := range f.completeOrder {
+		body, ok := f.partBodies[pn]
+		if !ok {
+			t.Fatalf("complete listed part %d but no part body was uploaded", pn)
+		}
+		out = append(out, body...)
+	}
+	return out
+}
+
+func TestPutObject_MultipartThresholdRouting(t *testing.T) {
+	t.Run("below threshold uses single put", func(t *testing.T) {
+		fake := &multipartFake{}
+		client := newMultipartTestClient(t, fake)
+
+		err := client.PutObject(context.Background(), "assets/small", strings.NewReader("0123456789"), "text/plain")
+		if err != nil {
+			t.Fatalf("PutObject: %v", err)
+		}
+		if fake.singlePuts != 1 || fake.creates != 0 || fake.completes != 0 {
+			t.Fatalf("singlePuts=%d creates=%d completes=%d, want 1/0/0", fake.singlePuts, fake.creates, fake.completes)
+		}
+	})
+
+	t.Run("above threshold uses multipart", func(t *testing.T) {
+		fake := &multipartFake{}
+		client := newMultipartTestClient(t, fake)
+		payload := multipartPayload(100)
+
+		err := client.PutObject(context.Background(), "agents/v1/linux-amd64", bytes.NewReader(payload), "application/octet-stream")
+		if err != nil {
+			t.Fatalf("PutObject: %v", err)
+		}
+		if fake.singlePuts != 0 || fake.creates != 1 || fake.completes != 1 {
+			t.Fatalf("singlePuts=%d creates=%d completes=%d, want 0/1/1", fake.singlePuts, fake.creates, fake.completes)
+		}
+		if fake.createKey != "agents/v1/linux-amd64" {
+			t.Fatalf("create key = %q", fake.createKey)
+		}
+		if fake.createType != "application/octet-stream" {
+			t.Fatalf("create content type = %q", fake.createType)
+		}
+		if !bytes.Equal(fake.reassembled(t), payload) {
+			t.Fatalf("reassembled parts do not match the original payload")
+		}
+	})
+
+	t.Run("unknown-size reader above threshold uses multipart", func(t *testing.T) {
+		fake := &multipartFake{}
+		client := newMultipartTestClient(t, fake)
+		payload := multipartPayload(100)
+		body := struct{ io.Reader }{bytes.NewReader(payload)}
+
+		err := client.PutObject(context.Background(), "assets/stream", body, "")
+		if err != nil {
+			t.Fatalf("PutObject: %v", err)
+		}
+		if fake.singlePuts != 0 || fake.creates != 1 || fake.completes != 1 {
+			t.Fatalf("singlePuts=%d creates=%d completes=%d, want 0/1/1", fake.singlePuts, fake.creates, fake.completes)
+		}
+		if !bytes.Equal(fake.reassembled(t), payload) {
+			t.Fatalf("reassembled parts do not match the original payload")
+		}
+	})
+}
+
+func TestPutObject_MultipartRetriesFailedPart(t *testing.T) {
+	fake := &multipartFake{failFirstTryPart: 2}
+	client := newMultipartTestClient(t, fake)
+	payload := multipartPayload(80) // parts: 16 x 4, 8
+
+	err := client.PutObject(context.Background(), "agents/v1/linux-amd64", bytes.NewReader(payload), "application/octet-stream")
+	if err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+	if fake.completes != 1 {
+		t.Fatalf("completes = %d, want 1", fake.completes)
+	}
+	if fake.partTries[2] < 2 {
+		t.Fatalf("part 2 attempts = %d, want at least 2", fake.partTries[2])
+	}
+	if !bytes.Equal(fake.reassembled(t), payload) {
+		t.Fatalf("reassembled parts do not match the original payload")
+	}
+}
+
 // Listing-derived rel paths must not escape the destination directory.
 func TestRelPathForKey(t *testing.T) {
 	for _, tc := range []struct {
@@ -581,4 +788,51 @@ func TestRelPathForKey(t *testing.T) {
 			t.Errorf("relPathForKey(%q) = (%q, %v), want (%q, %v)", tc.key, got, ok, tc.want, tc.ok)
 		}
 	}
+}
+
+// TestPutObject_MultipartFiresPartProgressCallback pins the callback
+// contract the sync upload stall watchdog depends on: onPart fires once per
+// part with the part's byte count, in order, regardless of how the SDK
+// buffers or re-reads the body.
+func TestPutObject_MultipartFiresPartProgressCallback(t *testing.T) {
+	const bodySize = 100
+	fake := &multipartFake{}
+	client := newMultipartTestClient(t, fake)
+
+	var mu sync.Mutex
+	var reported []int64
+	body := bytes.NewReader(make([]byte, bodySize))
+
+	if err := client.PutObjectWithPartProgress(context.Background(), "streamed/key", body, "application/octet-stream", func(n int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, n)
+	}); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []int64{16, 16, 16, 16, 16, 16, 4}
+	if !reflect.DeepEqual(reported, want) {
+		t.Fatalf("onPart = %v, want %v", reported, want)
+	}
+	if got := fake.reassembled(t); !bytes.Equal(got, make([]byte, bodySize)) {
+		t.Fatalf("uploaded payload corrupted: got %d bytes", len(got))
+	}
+}
+
+type countingReadSeeker struct {
+	r     *bytes.Reader
+	reads atomic.Int64
+}
+
+func (c *countingReadSeeker) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.reads.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	return c.r.Seek(offset, whence)
 }

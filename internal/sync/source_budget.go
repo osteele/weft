@@ -24,9 +24,13 @@ import (
 // case of a link that dribbles bytes indefinitely; it scales with the payload,
 // so it cannot contradict the size guard the way a fixed cap did.
 // SourceUploadStallTimeout bounds how long a single object upload may go
-// without moving a byte before it is abandoned. Variable so tests can shorten
-// the window; not a tuning knob.
-var SourceUploadStallTimeout = 2 * time.Minute
+// without moving a byte before it is abandoned. Large objects upload via
+// multipart with per-part progress feeds (PutObjectWithPartProgress); one
+// default 8 MiB part over the floor uplink (32 KB/s) takes ~256 s, so the
+// window must exceed a single part transfer for a healthy multipart upload
+// not to trip between feeds. 5 minutes covers the floor uplink with margin.
+// Variable so tests can shorten the window; not a tuning knob.
+var SourceUploadStallTimeout = 5 * time.Minute
 
 const (
 	// sourceUploadBudgetBase covers connection setup and request overhead that
@@ -121,6 +125,15 @@ func (r *stallWatchedReader) note() {
 	r.mu.Lock()
 	r.lastMove = time.Now()
 	r.mu.Unlock()
+}
+
+// Progress feeds the watchdog from transfer progress that does not show up
+// as a read of this reader — multipart part completions. The SDK may serve a
+// part from an internal buffer, so read-derived progress goes silent during
+// a slow part transfer; this keeps a healthy upload from tripping the stall
+// window.
+func (r *stallWatchedReader) Progress() {
+	r.note()
 }
 
 func (r *stallWatchedReader) Read(p []byte) (int, error) {

@@ -746,7 +746,9 @@ func TestPreflightRejectionSurvivesRestartAndDuplicateDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	rejected, ok := reloaded.Rejected["7500"]
-	if !ok || rejected.RunID != job.RunID || rejected.RejectedAt <= 0 || rejected.FailureReason != db.FailureReasonR2IsolatedSourceFetchFailed {
+	wantDetail := "r2_isolated_source_fetch_failed: download tarball: signal: killed"
+	if !ok || rejected.RunID != job.RunID || rejected.RejectedAt <= 0 ||
+		rejected.FailureReason != db.FailureReasonR2IsolatedSourceFetchFailed || rejected.Detail != wantDetail {
 		t.Fatalf("lost rejection after restart: %+v", rejected)
 	}
 	if err := reloaded.saveAt(r.stateFile, r.now().Add(48*time.Hour)); err != nil {
@@ -1419,6 +1421,55 @@ func TestRefreshRunningJobs_PublishesDeclaredWorkerResultAfterWaiterLoss(t *test
 	}
 	if _, err := os.Stat(filepath.Join(workDir, "should-not-exist")); !os.IsNotExist(err) {
 		t.Fatalf("recovery executed the command again: %v", err)
+	}
+}
+
+func TestRefreshRunningJobs_RecoveredProducesOutsideOutputDirs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	r, _ := initTestRunner(t)
+	workDir := t.TempDir()
+	const rel = ".agent-execution/results/recovered.json"
+	fullPath := filepath.Join(workDir, rel)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fullPath, []byte(`{"status":"completed"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	job := opsqueue.CommandJob{ID: 385, RunID: 42, Dir: workDir, Produces: []string{rel + ":385"}}
+	data, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.queueDir, "job-385.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	paths := NewJobPaths(r.logDir, job.ID)
+	if err := os.WriteFile(paths.Status, []byte("0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	r.state.AddRunning("385", RunningJobState{
+		RunID: 42, StartedAt: time.Now().Add(-time.Minute).Unix(), DiskPath: workDir,
+	})
+	r.refreshRunningJobs()
+	rec, err := ReadCompletionRecord(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.OutputFiles) != 1 || rec.OutputFiles[0].RelPath != rel {
+		t.Errorf("recovered outputs = %+v, want %s", rec.OutputFiles, rel)
+	}
+	manifest, err := artifacts.ReadManifestFile(ExpandTilde(artifacts.RemoteManifestPath(job.ID)), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Artifacts) != 1 || manifest.Artifacts[0].Path != rel {
+		t.Errorf("publication manifest = %+v, want %s", manifest.Artifacts, rel)
+	}
+	if files := r.discoverRecoveredOutputs(job.ID, 0, RunningJobState{
+		RunID: 43, StartedAt: time.Now().Add(-time.Minute).Unix(), DiskPath: workDir,
+	}, paths); len(files) != 0 {
+		t.Fatalf("reused another attempt's declarations: %+v", files)
 	}
 }
 

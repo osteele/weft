@@ -277,6 +277,43 @@ func TestBatchSyncPreflightRejectedRecordsReasonAndDispatchBlock(t *testing.T) {
 	}
 }
 
+// TestBatchSyncPreflightRejectedRecordsFailureDetail validates that the
+// runner's rejection detail (e.g. "pinned_source_fetch_failed: mkdir
+// .../rules: permission denied") is persisted on the dispatch-failed
+// lifecycle event, not just the classified failure_reason — `weft info`
+// renders the cause from this event next to the Reason line.
+func TestBatchSyncPreflightRejectedRecordsFailureDetail(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "rejected job with detail")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatalf("update last synced status: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+	jobByID := map[int64]*db.Job{jobID: job}
+	reason := db.FailureReasonPinnedSourceFetchFailed
+	detail := "pinned_source_fetch_failed: mkdir /srv/rules: permission denied"
+	statuses := map[int64]queueBatchStatus{
+		jobID: {State: queueStatePreflightRejected, RunID: 1, FailureReason: reason, FailureDetail: detail, Mtime: time.Now().Unix()},
+	}
+
+	if _, err := applyBatchStatuses(database, []int64{jobID}, jobByID, statuses, time.Second); err != nil {
+		t.Fatalf("applyBatchStatuses: %v", err)
+	}
+
+	got, err := db.LatestJobDispatchFailureDetail(database, jobID, reason)
+	if err != nil {
+		t.Fatalf("LatestJobDispatchFailureDetail: %v", err)
+	}
+	if got != detail {
+		t.Fatalf("dispatch failure detail = %q, want %q", got, detail)
+	}
+}
+
 // TestBatchSyncCompletedWithFailureReasonAlsoRecordsDispatchBlock validates
 // that the existing exit-code path also records a dispatch-failed lifecycle
 // event when a failure_reason is set. This keeps the diagnose surface

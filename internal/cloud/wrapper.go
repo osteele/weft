@@ -20,10 +20,16 @@ type AgentJob struct {
 	CPUCores        int      `json:"cpu_cores,omitempty"`
 	SetupPolicy     string   `json:"setup,omitempty"` // "" = auto-detect, "none" = the job owns its environment
 	WallTimeSeconds int      `json:"wall_time_seconds,omitempty"`
-	OutputDirs      []string `json:"output_dirs,omitempty"`
-	Outputs         []string `json:"outputs,omitempty"`
-	Produces        []string `json:"produces,omitempty"`
-	Needs           []string `json:"needs,omitempty"`
+	// GPUIdleTimeoutSeconds and StdoutSilenceTimeoutSeconds are per-job
+	// hang-watchdog overrides. nil = the agent picks by host cost tier;
+	// non-nil zero = that watchdog is disabled. Older agents ignore unknown
+	// fields and keep the cost-tier defaults.
+	GPUIdleTimeoutSeconds       *int     `json:"gpu_idle_timeout_seconds,omitempty"`
+	StdoutSilenceTimeoutSeconds *int     `json:"stdout_silence_timeout_seconds,omitempty"`
+	OutputDirs                  []string `json:"output_dirs,omitempty"`
+	Outputs                     []string `json:"outputs,omitempty"`
+	Produces                    []string `json:"produces,omitempty"`
+	Needs                       []string `json:"needs,omitempty"`
 	// Inputs are the declared input refs (e.g. "hf:Qwen/Qwen2.5-7B").
 	// Used by the agent to identify which HF cache entries belong to the
 	// current workload vs. stale assets from prior reuse.

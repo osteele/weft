@@ -654,7 +654,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 			dirs = config.DefaultOutputDirs
 		}
 		outputThreshold := AttemptOutputThreshold(phases.WrapperStart)
-		if discovered, discErr := DiscoverJobOutputsSince(workingDir, dirs, job.Outputs, outputThreshold); discErr == nil && len(discovered) > 0 {
+		if discovered, discErr := DiscoverJobOutputsSince(workingDir, dirs, DeclaredOutputRefs(job.Outputs, job.Produces), outputThreshold); discErr == nil && len(discovered) > 0 {
 			outputFiles = discovered
 			slog.Debug("discovered output files", "component", "runner", "job_id", cfg.JobID, "count", len(discovered))
 		}

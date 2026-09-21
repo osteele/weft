@@ -997,6 +997,14 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	// Write log header
 	WriteLogHeader(paths, jobID, job.Dir, command, job.SourceSHA)
 
+	// Persist declarations before execution so publication survives losing
+	// the process waiter during a runner restart.
+	if err := RecordDeclaredArtifacts(jobID, job.Produces, job.Outputs); err != nil {
+		slog.Warn("failed to pre-register declared artifacts",
+			"component", "runner", "job_id", jobID, "error", err)
+		WriteManifestErrorFile(paths, "pre-register: "+err.Error())
+	}
+
 	// Call OnJobStart hook (best-effort)
 	if r.OnJobStart != nil {
 		if stopFn := r.OnJobStart(jobID, job.RunID, paths.Log); stopFn != nil {
@@ -1363,7 +1371,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 			dirs = config.DefaultOutputDirs
 		}
 		outputThreshold := AttemptOutputThreshold(startTime)
-		if discovered, err := DiscoverJobOutputsSince(runDir, dirs, rj.Data.Outputs, outputThreshold); err == nil && len(discovered) > 0 {
+		if discovered, err := DiscoverJobOutputsSince(runDir, dirs, DeclaredOutputRefs(rj.Data.Outputs, rj.Data.Produces), outputThreshold); err == nil && len(discovered) > 0 {
 			outputFiles = discovered
 			oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d", len(discovered), TotalSizeMB(discovered)))
 			fmt.Printf("Job %s: discovered %d output files\n", ids.FormatJobID(jobID), len(discovered))
@@ -1781,7 +1789,7 @@ func (r *Runner) startRecoveredPostJob(jobID int64, rs RunningJobState, rec Comp
 	})
 }
 
-// discoverRecoveredOutputs discovers convention-based output files for a job
+// discoverRecoveredOutputs discovers convention and declared output files for a job
 // whose completion was recovered outside waitForJob (runner restart, wrapper
 // exit trap). It mirrors waitForJob's success-path discovery so the
 // completion record carries output_files, which `weft artifact sync` uses to
@@ -1802,11 +1810,23 @@ func (r *Runner) discoverRecoveredOutputs(jobID int64, exitCode int, rs RunningJ
 	workDir := rs.DiskPath
 	var dirs, refs []string
 	if rj, err := ReadJobFile(r.queueDir, jobID); err == nil {
+		if rj.ID != jobID || rj.RunID != rs.RunID {
+			slog.Warn("queue declaration belongs to another attempt; skipping recovered outputs",
+				"job_id", jobID, "run_id", rs.RunID, "declaration_run_id", rj.RunID)
+			return nil
+		}
 		dirs = rj.OutputDirs
-		refs = rj.Outputs
+		refs = DeclaredOutputRefs(rj.Outputs, rj.Produces)
 		if workDir == "" {
 			workDir = rj.Dir
 		}
+		if err := RecordDeclaredArtifacts(jobID, rj.Produces, rj.Outputs); err != nil {
+			slog.Warn("failed to recover declared artifact manifest", "job_id", jobID, "error", err)
+			WriteManifestErrorFile(paths, "recovery: "+err.Error())
+		}
+	} else if !os.IsNotExist(err) {
+		slog.Warn("cannot read recovered output declarations", "job_id", jobID, "error", err)
+		return nil
 	}
 	if workDir == "" {
 		return nil

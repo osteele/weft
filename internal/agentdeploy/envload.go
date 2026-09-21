@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/osteele/weft/internal/config"
 )
 
 // loadRepoEnvVars reads WEFT_* environment variables from .envrc or .env in
@@ -16,6 +18,20 @@ func loadRepoEnvVars(root string) map[string]string {
 		vars = parseEnvFile(filepath.Join(root, ".env"))
 	}
 	return vars
+}
+
+// loadConfigEnvVars reads WEFT_* variables from fly-builder.env in the weft
+// config directory ($XDG_CONFIG_HOME/weft or ~/.config/weft), parsed with the
+// same rules as parseEnvFile. It is the install-location-independent
+// counterpart to loadRepoEnvVars: installs from a jj workspace and the daemon
+// have no repo .envrc beside them, so builder configuration that lives only
+// there would otherwise be invisible to exactly those processes.
+func loadConfigEnvVars() map[string]string {
+	dir := config.ConfigDirFromEnv()
+	if dir == "" {
+		return nil
+	}
+	return parseEnvFile(filepath.Join(dir, "fly-builder.env"))
 }
 
 func parseEnvFile(path string) map[string]string {

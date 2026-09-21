@@ -71,14 +71,19 @@ type QueueEntry struct {
 	CPUReserveCores  int
 	RAMReservationKB int64
 	WallTimeSeconds  int
-	Tags             []string
-	OutputDirs       []string
-	Outputs          []string
-	Produces         []string
-	Needs            []string
-	ArtifactNeeds    []ArtifactNeed
-	Payloads         []Payload
-	SetupPolicy      string
+	// GPUIdleTimeoutSeconds and StdoutSilenceTimeoutSeconds carry per-job
+	// hang-watchdog overrides. nil = runner/agent default; non-nil zero =
+	// watchdog disabled.
+	GPUIdleTimeoutSeconds       *int
+	StdoutSilenceTimeoutSeconds *int
+	Tags                        []string
+	OutputDirs                  []string
+	Outputs                     []string
+	Produces                    []string
+	Needs                       []string
+	ArtifactNeeds               []ArtifactNeed
+	Payloads                    []Payload
+	SetupPolicy                 string
 }
 
 // Payload is the queue protocol identity of one immutable job input artifact.

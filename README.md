@@ -99,7 +99,7 @@ weft autopilot status --quiet
 
 ## Quick Start
 
-Install Git and Go 1.25.7 or newer. Ensure Go's binary directory is on your
+Install Git and Go 1.27.1 or newer (remote agent builders must run the same version or newer; the module directive enforces it). Ensure Go's binary directory is on your
 `PATH`; for the current shell:
 
 ```bash

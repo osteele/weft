@@ -448,6 +448,28 @@ func (j *Job) WallTime() time.Duration {
 	return time.Duration(j.Metadata.WallTimeSeconds) * time.Second
 }
 
+// GPUIdleTimeoutOverride returns the per-job GPU-idle watchdog override in
+// seconds, or nil when the job declares none (the agent's cost-tier default
+// applies). A non-nil zero disables the watchdog.
+func (j *Job) GPUIdleTimeoutOverride() *int {
+	if j == nil || j.Metadata == nil || j.Metadata.GPUIdleTimeoutSeconds == nil {
+		return nil
+	}
+	v := *j.Metadata.GPUIdleTimeoutSeconds
+	return &v
+}
+
+// StdoutSilenceTimeoutOverride returns the per-job stdout-silence watchdog
+// override in seconds, or nil when the job declares none (the agent's
+// cost-tier default applies). A non-nil zero disables the watchdog.
+func (j *Job) StdoutSilenceTimeoutOverride() *int {
+	if j == nil || j.Metadata == nil || j.Metadata.StdoutSilenceTimeoutSeconds == nil {
+		return nil
+	}
+	v := *j.Metadata.StdoutSilenceTimeoutSeconds
+	return &v
+}
+
 // RequestedMinSurvival returns the per-job cloud offer survival floor. A nil
 // override keeps the caller's default; explicit values, including 0, replace it.
 func (j *Job) RequestedMinSurvival(defaultFloor float64) float64 {

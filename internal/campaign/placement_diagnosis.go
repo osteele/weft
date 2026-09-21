@@ -26,6 +26,11 @@ type PlacementProbe struct {
 	Detail         string
 	ProviderErrors []string
 	Err            error
+	// SearchConstraints records the predicates the provider search and
+	// filter chain evaluated, and KeptCount how many offers passed them —
+	// the constraint check that admitted the quoted offer (wb163).
+	SearchConstraints string
+	KeptCount         int
 }
 
 // PlacementCounterfactual describes one constraint relaxation that changed
@@ -121,19 +126,22 @@ func runPlacementProbe(clients []cloud.Client, group InstanceGroup, survivalMode
 		return PlacementProbe{Err: fmt.Errorf("offer ranking produced no result")}
 	}
 	result := ranked[0]
+	constraintStr := formatProviderSearchConstraints(offerConstraintsForGroup(group, minReliability))
 	probe := PlacementProbe{
-		Offer:          result.Offer,
-		Survival:       result.SurvivalProb,
-		RawCount:       result.FilterStats.RawCount,
-		ProviderErrors: append([]string(nil), result.FilterStats.ProviderErrors...),
-		Err:            result.Err,
+		Offer:             result.Offer,
+		Survival:          result.SurvivalProb,
+		RawCount:          result.FilterStats.RawCount,
+		ProviderErrors:    append([]string(nil), result.FilterStats.ProviderErrors...),
+		Err:               result.Err,
+		SearchConstraints: constraintStr,
+		KeptCount:         result.FilterStats.KeptCount(),
 	}
 	if result.Err != nil {
 		probe.Detail = result.Err.Error()
 	} else if result.Offer != nil {
 		probe.Detail = "viable offer found"
 	} else {
-		probe.Detail = result.FilterStats.NoOffersDetail(formatProviderSearchConstraints(offerConstraintsForGroup(group, minReliability)))
+		probe.Detail = result.FilterStats.NoOffersDetail(constraintStr)
 	}
 	return probe
 }

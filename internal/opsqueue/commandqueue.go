@@ -75,14 +75,19 @@ type CommandJob struct {
 	CPUReserveCores  int             `json:"cpu_reserve_cores,omitempty"` // absolute per-job CPU reservation in cores, normalized to percent by the runner host
 	RAMReservationKB int64           `json:"ram_reservation_kb,omitempty"`
 	WallTimeSeconds  int             `json:"wall_time_seconds,omitempty"`
-	Tags             []string        `json:"tags,omitempty"`
-	OutputDirs       []string        `json:"output_dirs,omitempty"` // convention-based output directories from .weft.toml
-	Outputs          []string        `json:"outputs,omitempty"`     // declared output refs from PEP 723/CLI
-	Produces         []string        `json:"produces,omitempty"`    // artifact specs this job produces
-	Needs            []string        `json:"needs,omitempty"`       // artifact specs this job needs
-	ArtifactNeeds    []ArtifactNeed  `json:"artifact_needs,omitempty"`
-	Payloads         []Payload       `json:"payloads,omitempty"`
-	SetupPolicy      string          `json:"setup,omitempty"` // "" = auto-detect, "none" = the job owns its environment
+	// GPUIdleTimeoutSeconds and StdoutSilenceTimeoutSeconds carry per-job
+	// hang-watchdog overrides. Absent (nil) = agent cost-tier default;
+	// non-nil zero = watchdog disabled. Older agents ignore unknown fields.
+	GPUIdleTimeoutSeconds       *int           `json:"gpu_idle_timeout_seconds,omitempty"`
+	StdoutSilenceTimeoutSeconds *int           `json:"stdout_silence_timeout_seconds,omitempty"`
+	Tags                        []string       `json:"tags,omitempty"`
+	OutputDirs                  []string       `json:"output_dirs,omitempty"` // convention-based output directories from .weft.toml
+	Outputs                     []string       `json:"outputs,omitempty"`     // declared output refs from PEP 723/CLI
+	Produces                    []string       `json:"produces,omitempty"`    // artifact specs this job produces
+	Needs                       []string       `json:"needs,omitempty"`       // artifact specs this job needs
+	ArtifactNeeds               []ArtifactNeed `json:"artifact_needs,omitempty"`
+	Payloads                    []Payload      `json:"payloads,omitempty"`
+	SetupPolicy                 string         `json:"setup,omitempty"` // "" = auto-detect, "none" = the job owns its environment
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -113,34 +118,36 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		Op:              OpAdd,
 		Job: &CommandJob{
-			ID:               entry.JobID,
-			RunID:            entry.RunID,
-			Dir:              entry.WorkingDir,
-			Cmd:              entry.Command,
-			Desc:             entry.Description,
-			SourceSHA:        entry.SourceSHA256,
-			SourceR2Key:      entry.SourceR2Key,
-			SourceManifest:   entry.SourceManifest,
-			Env:              entry.EnvVars,
-			Deps:             entry.DepSpec,
-			CPU:              entry.CPUAllotment,
-			GPU:              entry.GPU,
-			GPUClass:         entry.GPUClass,
-			GPUCount:         entry.GPUCount,
-			GPUMem:           entry.GPUMemGB,
-			Interconnect:     entry.Interconnect,
-			CPUCores:         entry.CPUCores,
-			CPUReserveCores:  entry.CPUReserveCores,
-			RAMReservationKB: entry.RAMReservationKB,
-			WallTimeSeconds:  entry.WallTimeSeconds,
-			Tags:             entry.Tags,
-			OutputDirs:       entry.OutputDirs,
-			Outputs:          entry.Outputs,
-			Produces:         entry.Produces,
-			Needs:            entry.Needs,
-			ArtifactNeeds:    entry.ArtifactNeeds,
-			Payloads:         entry.Payloads,
-			SetupPolicy:      entry.SetupPolicy,
+			ID:                          entry.JobID,
+			RunID:                       entry.RunID,
+			Dir:                         entry.WorkingDir,
+			Cmd:                         entry.Command,
+			Desc:                        entry.Description,
+			SourceSHA:                   entry.SourceSHA256,
+			SourceR2Key:                 entry.SourceR2Key,
+			SourceManifest:              entry.SourceManifest,
+			Env:                         entry.EnvVars,
+			Deps:                        entry.DepSpec,
+			CPU:                         entry.CPUAllotment,
+			GPU:                         entry.GPU,
+			GPUClass:                    entry.GPUClass,
+			GPUCount:                    entry.GPUCount,
+			GPUMem:                      entry.GPUMemGB,
+			Interconnect:                entry.Interconnect,
+			CPUCores:                    entry.CPUCores,
+			CPUReserveCores:             entry.CPUReserveCores,
+			RAMReservationKB:            entry.RAMReservationKB,
+			WallTimeSeconds:             entry.WallTimeSeconds,
+			GPUIdleTimeoutSeconds:       entry.GPUIdleTimeoutSeconds,
+			StdoutSilenceTimeoutSeconds: entry.StdoutSilenceTimeoutSeconds,
+			Tags:                        entry.Tags,
+			OutputDirs:                  entry.OutputDirs,
+			Outputs:                     entry.Outputs,
+			Produces:                    entry.Produces,
+			Needs:                       entry.Needs,
+			ArtifactNeeds:               entry.ArtifactNeeds,
+			Payloads:                    entry.Payloads,
+			SetupPolicy:                 entry.SetupPolicy,
 		},
 	}
 }

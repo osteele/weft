@@ -869,6 +869,14 @@ func persistentAttemptMetadata(meta *db.JobMetadata) *db.JobMetadata {
 		out.Source = &source
 	}
 	out.WallTimeSeconds = meta.WallTimeSeconds
+	if meta.GPUIdleTimeoutSeconds != nil {
+		v := *meta.GPUIdleTimeoutSeconds
+		out.GPUIdleTimeoutSeconds = &v
+	}
+	if meta.StdoutSilenceTimeoutSeconds != nil {
+		v := *meta.StdoutSilenceTimeoutSeconds
+		out.StdoutSilenceTimeoutSeconds = &v
+	}
 	return persistentOrNonEmptyJobMetadata(out)
 }
 
@@ -876,7 +884,7 @@ func persistentOrNonEmptyJobMetadata(meta *db.JobMetadata) *db.JobMetadata {
 	if meta == nil {
 		return nil
 	}
-	if meta.CPU == nil && meta.Resource == nil && meta.Telemetry == nil && meta.Dependencies == nil && meta.Disk == nil && meta.Source == nil && meta.Agent == nil && meta.Reconciliation == nil && meta.SubmissionNonce == "" && len(meta.BestEffortInputs) == 0 && meta.WallTimeSeconds == 0 {
+	if meta.CPU == nil && meta.Resource == nil && meta.Telemetry == nil && meta.Dependencies == nil && meta.Disk == nil && meta.Source == nil && meta.Agent == nil && meta.Reconciliation == nil && meta.SubmissionNonce == "" && len(meta.BestEffortInputs) == 0 && meta.WallTimeSeconds == 0 && meta.GPUIdleTimeoutSeconds == nil && meta.StdoutSilenceTimeoutSeconds == nil {
 		return nil
 	}
 	return meta

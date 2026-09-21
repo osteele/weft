@@ -30,7 +30,14 @@ const (
 	// BootstrapOrigin is nil. It is used only when bootstrap survival data is
 	// unavailable. In normal operation instance_check.go uses the bootstrap
 	// survival terminate threshold instead.
-	launchingPhaseTimeout = 12 * time.Minute
+	//
+	// 20m matches the survival analysis default (DefaultTermSec): measured
+	// agent-ready times over the last 45 days (426 vastai launches) average
+	// 5.9m but the tail runs long — 40 launches exceeded 12m, max 105m — so
+	// a 12m fallback orphans healthy slow-provisioning instances (wi7912:
+	// L40S still 'created' at 14m16s, killed, machine would likely have
+	// bootstrapped).
+	launchingPhaseTimeout = 20 * time.Minute
 
 	// dudVastTimeout is how long after Vast reports `running` we wait for the
 	// OnStart first-line probe to land in R2 before declaring a "dud".

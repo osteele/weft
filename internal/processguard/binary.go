@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -70,14 +71,27 @@ func (s BinarySnapshot) Identity() db.BinaryIdentity {
 }
 
 func EnsureCurrentBinary() error {
-	changed, err := BinaryChanged()
-	if err != nil {
-		return err
+	if !processBinary.Valid {
+		return nil
 	}
-	if changed {
-		return ErrBinaryChanged
+	current := CapturePath(processBinary.Path)
+	if !current.Valid {
+		return fmt.Errorf("stat current executable %s", processBinary.Path)
+	}
+	if SnapshotsDiffer(processBinary, current) {
+		// Name both sides of the mismatch: without the paths, sizes, and
+		// mtimes the operator cannot tell which process to restart or
+		// whether the new binary is the one they meant to load (wb165).
+		return fmt.Errorf("%w: the running process started on %s (size %d, mtime %s) but that path is now size %d, mtime %s; restart to load the on-disk binary",
+			ErrBinaryChanged,
+			processBinary.Path, processBinary.Size, formatBinaryMtime(processBinary.ModTimeUnix),
+			current.Size, formatBinaryMtime(current.ModTimeUnix))
 	}
 	return nil
+}
+
+func formatBinaryMtime(unix int64) string {
+	return time.Unix(unix, 0).UTC().Format("2006-01-02 15:04:05 UTC")
 }
 
 func BinaryChanged() (bool, error) {

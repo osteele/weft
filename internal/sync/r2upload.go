@@ -70,6 +70,7 @@ type sourceObjectStore interface {
 	ObjectExists(context.Context, string) (bool, error)
 	ListObjectsLimited(context.Context, string, int) ([]r2.ObjectInfo, bool, error)
 	PutObject(context.Context, string, io.Reader, string) error
+	PutObjectWithPartProgress(context.Context, string, io.Reader, string, func(int64)) error
 	PutObjectConditional(context.Context, string, io.Reader, string, string, string) (string, error)
 }
 
@@ -357,7 +358,14 @@ func uploadSourceObject(ctx context.Context, store sourceObjectStore, object sou
 	body := newStallWatchedReader(file, SourceUploadStallTimeout, cancelUpload)
 	defer body.stop()
 
-	if err := store.PutObject(uploadCtx, object.key, body, object.contentType); err != nil {
+	// Multipart uploads may serve a part from an internal SDK buffer, so
+	// the watchdog cannot rely on body reads alone: per-part progress feeds
+	// it through the transfer. Large objects above the multipart threshold
+	// get the feed; the single-shot path streams the body directly and
+	// read-derived progress already works there.
+	if err := store.PutObjectWithPartProgress(uploadCtx, object.key, body, object.contentType, func(int64) {
+		body.Progress()
+	}); err != nil {
 		_ = file.Close()
 		if body.stalled() {
 			return describeStall(object.label, SourceUploadStallTimeout)

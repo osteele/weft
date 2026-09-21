@@ -1459,6 +1459,20 @@ func configDirFromEnv(testMode bool, xdgConfigHome, home string, pid int) string
 	return filepath.Join(home, ".config", "weft")
 }
 
+// ConfigDirFromEnv returns the directory that contains global weft config
+// files, resolved from the current process environment at call time. Unlike
+// ConfigDir it is neither pinned at startup nor redirected under go test, so
+// callers resolving operator-provided files outside config.toml (such as
+// builder environment files) see the directory a fresh process would see, and
+// tests can point HOME at a temp dir.
+func ConfigDirFromEnv() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	return configDirFromEnv(false, os.Getenv("XDG_CONFIG_HOME"), home, os.Getpid())
+}
+
 func runningUnderGoTest() bool {
 	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
 }

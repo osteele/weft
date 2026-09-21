@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -50,6 +51,30 @@ func printJobKillAttribution(w io.Writer, database *sql.DB, job *db.Job) {
 	if attribution.Reason != "" {
 		fmt.Fprintf(w, "Kill Reason:  %s\n", attribution.Reason)
 	}
+}
+
+// dispatchFailureCause returns the underlying cause recorded for the job's
+// latest dispatch failure, for display under the classified Reason line in
+// `weft job info`. The runner reports preflight rejections with a
+// "<reason>: <cause>" detail that the sync loop persists as an
+// EventQueueDispatchFailed lifecycle event; stripping the classification
+// prefix leaves the cause. Returns "" when the current attempt has no
+// recorded dispatch failure or the event only repeats the classification.
+func dispatchFailureCause(database *sql.DB, job *db.Job) string {
+	if database == nil || job == nil || job.FailureReason == "" {
+		return ""
+	}
+	run, ok := db.LatestDispatchAttemptRun(database, job.ID, db.DispatchRunFloor(job), time.Now())
+	if !ok {
+		return ""
+	}
+	detail := firstLine(run.Detail)
+	if prefix := job.FailureReason + ":"; strings.HasPrefix(detail, prefix) {
+		detail = strings.TrimSpace(strings.TrimPrefix(detail, prefix))
+	} else if detail == job.FailureReason {
+		return ""
+	}
+	return detail
 }
 
 func jobPublicationDiagnosticLines(database *sql.DB, job *db.Job) []string {

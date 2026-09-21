@@ -30,22 +30,29 @@ type ScriptMeta struct {
 	// values: a numeric cap ("9.0", "12.0"), a generation name ("ampere",
 	// "hopper", "blackwell"), or "any" to disable inferred filtering. Empty
 	// string means "auto-infer from the project's torch pin".
-	GPUArchMax      string
-	Inputs          []string
-	Outputs         []string
-	Tags            []string          // Job tags
-	Image           string            // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
-	MinDriver       string            // Minimum NVIDIA driver version for the image (e.g., "535")
-	MinCUDA         string            // Minimum CUDA compatibility for the provider (e.g., "12.8")
-	ImagePullSecret string            // Registry config key for pulling private images
-	RunpodCloudType string            // RunPod cloud type override ("community" or "secure")
-	VastCapAdd      []string          // Vast.ai-only --cap-add values (e.g., ["SYS_ADMIN"])
-	UvArgs          []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
-	Env             map[string]string // Environment variables to set when running the job
-	PreInstall      string            // Shell command to run before the job (e.g., "apt-get install -y libnuma-dev")
-	Isolated        bool              // Skip project-level uv sync; script runs in an isolated PEP 723 environment
-	Preemptible     bool              // Allow interruptible cloud placement (also accepts legacy "preemptible" key)
-	HFOffline       *bool             // Run the job with HF_HUB_OFFLINE=1 (declared inputs are pre-staged), when explicitly set
+	GPUArchMax string
+	// GPUIdleTimeout and StdoutSilenceTimeout override the agent's cost-tier
+	// hang-watchdog thresholds (specs/job-lifecycle.allium rules
+	// GPUIdleKillsJob/StdoutSilenceKillsJob). Go duration strings (e.g. "45m");
+	// "0" or "off" disables that watchdog. Empty means "use the cost-tier
+	// default".
+	GPUIdleTimeout       string
+	StdoutSilenceTimeout string
+	Inputs               []string
+	Outputs              []string
+	Tags                 []string          // Job tags
+	Image                string            // Docker image override (e.g., "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime")
+	MinDriver            string            // Minimum NVIDIA driver version for the image (e.g., "535")
+	MinCUDA              string            // Minimum CUDA compatibility for the provider (e.g., "12.8")
+	ImagePullSecret      string            // Registry config key for pulling private images
+	RunpodCloudType      string            // RunPod cloud type override ("community" or "secure")
+	VastCapAdd           []string          // Vast.ai-only --cap-add values (e.g., ["SYS_ADMIN"])
+	UvArgs               []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
+	Env                  map[string]string // Environment variables to set when running the job
+	PreInstall           string            // Shell command to run before the job (e.g., "apt-get install -y libnuma-dev")
+	Isolated             bool              // Skip project-level uv sync; script runs in an isolated PEP 723 environment
+	Preemptible          bool              // Allow interruptible cloud placement (also accepts legacy "preemptible" key)
+	HFOffline            *bool             // Run the job with HF_HUB_OFFLINE=1 (declared inputs are pre-staged), when explicitly set
 }
 
 // isEmpty reports whether the [tool.weft] block carries any user intent.
@@ -60,7 +67,7 @@ func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUCount == 0 && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
 		m.Interconnect == "" && m.CPUCores == 0 && m.CPUMemGB == 0 && m.CPUMemStrict == nil &&
 		m.DiskGB == 0 && m.DiskMaxGB == 0 && m.RuntimeDiskGB == 0 && m.WallTime == "" &&
-		m.GPUArchMax == "" &&
+		m.GPUArchMax == "" && m.GPUIdleTimeout == "" && m.StdoutSilenceTimeout == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
 		m.MinDriver == "" && m.MinCUDA == "" && m.ImagePullSecret == "" && m.RunpodCloudType == "" &&
 		len(m.VastCapAdd) == 0 && len(m.UvArgs) == 0 && len(m.Env) == 0 &&
@@ -122,6 +129,8 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			if v, ok := wt.Get("gpu-arch-max").(string); ok {
 				meta.GPUArchMax = v
 			}
+			meta.GPUIdleTimeout = firstStringValue(wt, "gpu-idle-timeout", "gpu_idle_timeout")
+			meta.StdoutSilenceTimeout = firstStringValue(wt, "stdout-silence-timeout", "stdout_silence_timeout")
 			meta.Inputs = tomlStringSlice(wt, "inputs")
 			meta.Outputs = tomlStringSlice(wt, "outputs")
 			meta.Tags = tomlStringSlice(wt, "tags")

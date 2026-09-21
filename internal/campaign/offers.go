@@ -100,6 +100,26 @@ type OfferFilterStats struct {
 // rather than copying the phrasing, so rewording cannot silently defang them.
 const ZeroOffersPrefix = "provider search returned 0 offers"
 
+// KeptCount reports how many offers survived every filter stage that ran.
+// applyEligibilityFilters records the running offer count at each stage, so
+// the counters are monotonically non-increasing and the survivors are the
+// LAST stage that ran — scan in reverse order and return the first recorded
+// count. Only meaningful when an offer was admitted (survivors >= 1); on a
+// zeroed funnel the scan would walk back to the last stage that still had
+// offers, which callers never surface for rejected requests.
+func (s OfferFilterStats) KeptCount() int {
+	for _, stage := range []int{
+		s.AfterSurvival, s.AfterHourlyRate, s.AfterTorchArch, s.AfterForward,
+		s.AfterProvider, s.AfterCUDA, s.AfterInterconnect, s.AfterHostRAM,
+		s.AfterGPUCount, s.AfterVRAM, s.AfterSKUMemory,
+	} {
+		if stage > 0 {
+			return stage
+		}
+	}
+	return 0
+}
+
 // NoOffersDetail returns a human-readable explanation of why no offers survived
 // filtering. When constraints is non-empty the zero-offers branch lists the
 // predicates that were searched — note that it reports what was asked for, not

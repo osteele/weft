@@ -1918,3 +1918,39 @@ func TestInterconnectUniformIgnoresSlotPackedGPUCount(t *testing.T) {
 		t.Fatalf("spanning group kept %d offers (removed %d), want 0 kept", len(got), removed)
 	}
 }
+
+func TestOfferFilterStatsKeptCount(t *testing.T) {
+	cases := []struct {
+		name  string
+		stats OfferFilterStats
+		want  int
+	}{
+		{
+			name:  "shrinking funnel returns the last stage",
+			stats: OfferFilterStats{RawCount: 10, AfterSKUMemory: 10, AfterVRAM: 6, AfterHourlyRate: 3, AfterSurvival: 1},
+			want:  1,
+		},
+		{
+			name:  "full funnel returns the survivors",
+			stats: OfferFilterStats{RawCount: 7, AfterSKUMemory: 7, AfterVRAM: 7, AfterGPUCount: 7, AfterCUDA: 7, AfterSurvival: 7},
+			want:  7,
+		},
+		{
+			name:  "partial funnel stops at the last stage that ran",
+			stats: OfferFilterStats{RawCount: 5, AfterSKUMemory: 5, AfterVRAM: 4, AfterGPUCount: 4},
+			want:  4,
+		},
+		{
+			name:  "empty stats",
+			stats: OfferFilterStats{},
+			want:  0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.stats.KeptCount(); got != tc.want {
+				t.Fatalf("KeptCount() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

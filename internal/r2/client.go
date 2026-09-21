@@ -3,6 +3,7 @@
 package r2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,7 +29,29 @@ type Client struct {
 	s3       *s3.Client
 	bucket   string
 	endpoint string
+	// multipartThresholdBytes and multipartPartSizeBytes override the
+	// multipart routing threshold and part size. Zero selects the defaults.
+	// Tests lower them to exercise the multipart path with small payloads.
+	multipartThresholdBytes int64
+	multipartPartSizeBytes  int64
 }
+
+const (
+	// defaultMultipartThresholdBytes is the object size at or above which
+	// PutObject switches from a single request to an S3 multipart upload.
+	// Matches the S3 upload manager's default threshold; the 24.5 MiB agent
+	// binary is the motivating large object, since a single-shot upload must
+	// finish inside the same staging budget as the source tarballs and a
+	// stalled transfer forfeits the whole object.
+	defaultMultipartThresholdBytes = 16 << 20
+	// defaultMultipartPartSizeBytes matches the S3 upload manager's default
+	// part size and satisfies the 5 MiB minimum for non-final parts.
+	defaultMultipartPartSizeBytes = 8 << 20
+	// multipartPartAttempts bounds the explicit per-part retries layered on
+	// top of the SDK's request-level retryer, so a failed part is resent
+	// without restarting the upload.
+	multipartPartAttempts = 3
+)
 
 type progressWriter struct {
 	w          io.Writer
@@ -557,8 +580,102 @@ func (c *Client) ListObjectsLimited(ctx context.Context, prefix string, maxObjec
 	return result, true, nil
 }
 
-// PutObject uploads data to R2 under the given key.
+// PutObject uploads data to R2 under the given key. Objects at or above the
+// multipart threshold upload via S3 multipart with per-part retry, so a
+// stalled or failed part is resent without forfeiting the whole transfer;
+// smaller objects use a single PutObject.
+//
+// A seekable body is streamed part by part without full client-side
+// buffering. Whether its reads pace with the network is up to the SDK's
+// internal buffering; callers that derive progress from body reads must use
+// PutObjectWithPartProgress instead.
 func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, contentType string) error {
+	return c.PutObjectWithPartProgress(ctx, key, body, contentType, nil)
+}
+
+// PutObjectWithPartProgress is PutObject with onPart invoked after each
+// multipart part is uploaded (with the part's byte count). The SDK may serve
+// a part from an internal buffer rather than reading the caller's body
+// during the transfer, so callers whose progress signals depend on body
+// reads — the sync upload stall watchdog — must feed them from this callback
+// instead. The callback fires client-side and is synchronous; the single
+// PutObject path ignores it because its body streams through the SDK
+// directly and read-derived progress already works there.
+func (c *Client) PutObjectWithPartProgress(ctx context.Context, key string, body io.Reader, contentType string, onPart func(int64)) error {
+	threshold := c.multipartThreshold()
+	if size, ok := readerSize(body); ok {
+		if size >= threshold {
+			return c.putObjectMultipart(ctx, key, body, contentType, size, onPart)
+		}
+		return c.putObjectSingle(ctx, key, body, contentType)
+	}
+	// Unknown size: buffer up to the threshold. Bodies that fit stay
+	// single-shot; larger ones stream the buffered prefix plus the
+	// remainder through the buffered multipart path.
+	prefix, rest, err := bufferUpTo(body, threshold)
+	if err != nil {
+		return fmt.Errorf("read object %s: %w", key, err)
+	}
+	if rest == nil {
+		return c.putObjectSingle(ctx, key, bytes.NewReader(prefix), contentType)
+	}
+	return c.putObjectMultipart(ctx, key, io.MultiReader(bytes.NewReader(prefix), rest), contentType, 0, onPart)
+}
+
+func (c *Client) multipartThreshold() int64 {
+	if c.multipartThresholdBytes > 0 {
+		return c.multipartThresholdBytes
+	}
+	return defaultMultipartThresholdBytes
+}
+
+func (c *Client) multipartPartSize() int64 {
+	if c.multipartPartSizeBytes > 0 {
+		return c.multipartPartSizeBytes
+	}
+	return defaultMultipartPartSizeBytes
+}
+
+// readerSize reports the remaining readable length of body when it can be
+// determined without consuming data.
+func readerSize(body io.Reader) (int64, bool) {
+	switch b := body.(type) {
+	case *bytes.Reader:
+		return int64(b.Len()), true
+	case *strings.Reader:
+		return int64(b.Len()), true
+	case io.Seeker:
+		cur, err := b.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, false
+		}
+		end, err := b.Seek(0, io.SeekEnd)
+		if err != nil {
+			return 0, false
+		}
+		if _, err := b.Seek(cur, io.SeekStart); err != nil {
+			return 0, false
+		}
+		return end - cur, true
+	}
+	return 0, false
+}
+
+// bufferUpTo reads up to limit bytes from r. rest is nil when r was fully
+// consumed within the limit; otherwise rest yields the buffered overflow
+// followed by the unread remainder of r.
+func bufferUpTo(r io.Reader, limit int64) (prefix []byte, rest io.Reader, err error) {
+	buf, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	if int64(len(buf)) <= limit {
+		return buf, nil, nil
+	}
+	return buf[:limit], io.MultiReader(bytes.NewReader(buf[limit:]), r), nil
+}
+
+func (c *Client) putObjectSingle(ctx context.Context, key string, body io.Reader, contentType string) error {
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(key),
@@ -572,6 +689,228 @@ func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, cont
 		return fmt.Errorf("put object %s: %w", key, err)
 	}
 	return nil
+}
+
+// putObjectMultipart uploads body as an S3 multipart upload. Parts are sent
+// sequentially; each part is retried up to multipartPartAttempts times, and
+// any failure aborts the upload so orphaned parts are not left in the bucket.
+func (c *Client) putObjectMultipart(ctx context.Context, key string, body io.Reader, contentType string, size int64, onPart func(int64)) error {
+	createInput := &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	}
+	if contentType != "" {
+		createInput.ContentType = aws.String(contentType)
+	}
+	create, err := c.s3.CreateMultipartUpload(ctx, createInput)
+	if err != nil {
+		return fmt.Errorf("create multipart upload %s: %w", key, err)
+	}
+	uploadID := create.UploadId
+
+	// abort uses a detached context because ctx is usually already canceled
+	// or exhausted by the time a failure surfaces.
+	abort := func(cause error) error {
+		abortCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = c.s3.AbortMultipartUpload(abortCtx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(c.bucket),
+			Key:      aws.String(key),
+			UploadId: uploadID,
+		})
+		return cause
+	}
+
+	// A seekable body with a known size streams part by part: each part
+	// reads through the caller's reader at network pace, so read-derived
+	// progress signals stay live for the whole transfer. Buffering instead
+	// would front-load the reads and leave the wire idle for the rest of
+	// each part, which the sync upload stall watchdog reads as a stall
+	// (wb158 review). Non-seekable bodies have no choice but to buffer.
+	seeker, seekable := body.(interface {
+		io.Reader
+		io.Seeker
+	})
+	if !seekable || size <= 0 {
+		return c.putObjectMultipartBuffered(ctx, key, body, contentType, uploadID, abort, onPart)
+	}
+
+	partSize := c.multipartPartSize()
+	var parts []types.CompletedPart
+	partNumber := int32(1)
+	for offset := int64(0); offset < size; offset, partNumber = offset+partSize, partNumber+1 {
+		length := partSize
+		if remaining := size - offset; remaining < length {
+			length = remaining
+		}
+		makePart := func() (io.Reader, int64, error) {
+			return &sectionReadSeeker{r: seeker, s: seeker, base: offset, limit: length, underPos: -1}, length, nil
+		}
+		etag, err := c.uploadPartWithRetry(ctx, key, uploadID, partNumber, makePart)
+		if err != nil {
+			return abort(fmt.Errorf("upload part %d of %s: %w", partNumber, key, err))
+		}
+		if onPart != nil {
+			onPart(length)
+		}
+		parts = append(parts, types.CompletedPart{
+			ETag:       aws.String(etag),
+			PartNumber: aws.Int32(partNumber),
+		})
+	}
+
+	_, err = c.s3.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(c.bucket),
+		Key:             aws.String(key),
+		UploadId:        uploadID,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	})
+	if err != nil {
+		return abort(fmt.Errorf("complete multipart upload %s: %w", key, err))
+	}
+	return nil
+}
+
+// putObjectMultipartBuffered is the multipart path for bodies that cannot
+// seek: each part is read into memory up front and resent from the buffer on
+// retry. Reads of the caller's reader concentrate before each part transfer,
+// so callers whose progress depends on read pacing should pass a seekable
+// body for large objects.
+func (c *Client) putObjectMultipartBuffered(ctx context.Context, key string, body io.Reader, contentType string, uploadID *string, abort func(error) error, onPart func(int64)) error {
+	buf := make([]byte, c.multipartPartSize())
+	var parts []types.CompletedPart
+	partNumber := int32(1)
+	for {
+		n, readErr := io.ReadFull(body, buf)
+		if readErr == io.EOF && n == 0 {
+			break
+		}
+		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			return abort(fmt.Errorf("read object %s: %w", key, readErr))
+		}
+		part := make([]byte, n)
+		copy(part, buf[:n])
+		etag, err := c.uploadPartWithRetry(ctx, key, uploadID, partNumber, func() (io.Reader, int64, error) {
+			return bytes.NewReader(part), int64(n), nil
+		})
+		if err != nil {
+			return abort(fmt.Errorf("upload part %d of %s: %w", partNumber, key, err))
+		}
+		if onPart != nil {
+			onPart(int64(n))
+		}
+		parts = append(parts, types.CompletedPart{
+			ETag:       aws.String(etag),
+			PartNumber: aws.Int32(partNumber),
+		})
+		partNumber++
+		if readErr == io.ErrUnexpectedEOF {
+			break
+		}
+	}
+
+	_, err := c.s3.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(c.bucket),
+		Key:             aws.String(key),
+		UploadId:        uploadID,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	})
+	if err != nil {
+		return abort(fmt.Errorf("complete multipart upload %s: %w", key, err))
+	}
+	return nil
+}
+
+// sectionReadSeeker presents a fixed-length window of an underlying
+// reader-and-seeker as a seekable stream. The SDK's payload hashing seeks
+// the part body back to its start on (re)send, while the reads themselves
+// keep flowing through the underlying reader at network pace — callers that
+// derive progress from those reads (the sync upload stall watchdog) stay
+// live across retries.
+//
+// underPos tracks the underlying stream's position and starts at -1
+// (unknown): several windows are created over one shared underlying seeker
+// by consecutive part uploads, so assuming position 0 would re-send bytes
+// from a previous part's window (wb158 review).
+type sectionReadSeeker struct {
+	r        io.Reader
+	s        io.Seeker
+	base     int64 // window start within the underlying stream
+	limit    int64 // window length
+	underPos int64 // current position in the underlying stream; -1 = unknown
+	pos      int64 // current position within the window
+}
+
+func (s *sectionReadSeeker) Read(p []byte) (int, error) {
+	if s.pos >= s.limit {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > s.limit-s.pos {
+		p = p[:s.limit-s.pos]
+	}
+	if s.underPos != s.base+s.pos {
+		if _, err := s.s.Seek(s.base+s.pos, io.SeekStart); err != nil {
+			return 0, err
+		}
+		s.underPos = s.base + s.pos
+	}
+	n, err := s.r.Read(p)
+	s.pos += int64(n)
+	s.underPos += int64(n)
+	return n, err
+}
+
+func (s *sectionReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekCurrent:
+		offset += s.pos
+	case io.SeekEnd:
+		offset += s.limit
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("seek before window start")
+	}
+	s.pos = offset
+	return s.pos, nil
+}
+
+// uploadPartWithRetry uploads one part, retrying failed attempts with a
+// linear backoff. makePart supplies a fresh reader over the part payload for
+// every attempt, so a streaming part re-reads from its source and a buffered
+// part resends the same bytes.
+func (c *Client) uploadPartWithRetry(ctx context.Context, key string, uploadID *string, partNumber int32, makePart func() (io.Reader, int64, error)) (string, error) {
+	var lastErr error
+	for attempt := range multipartPartAttempts {
+		if attempt > 0 {
+			timer := time.NewTimer(time.Duration(attempt) * 500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return "", ctx.Err()
+			case <-timer.C:
+			}
+		}
+		part, length, err := makePart()
+		if err != nil {
+			return "", err
+		}
+		out, err := c.s3.UploadPart(ctx, &s3.UploadPartInput{
+			Bucket:        aws.String(c.bucket),
+			Key:           aws.String(key),
+			UploadId:      uploadID,
+			PartNumber:    aws.Int32(partNumber),
+			Body:          part,
+			ContentLength: aws.Int64(length),
+		})
+		if err == nil {
+			return aws.ToString(out.ETag), nil
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		lastErr = err
+	}
+	return "", lastErr
 }
 
 // ErrPreconditionFailed signals that an R2 conditional write or read failed

@@ -899,7 +899,7 @@ contract ConstraintSystemCoverage {
 -- GPU memory floor (wb130); each was a path re-binding without a full
 -- eligibility pass.
 contract BindingPathsAreExhaustive {
-    -- The eight binding paths and their implementations:
+    -- The binding paths and their implementations:
         --   submit: job-lifecycle PlaceJob calls SelectBestHost here
         --   cloud_spill: PlaceWithFallback's spill branch (control passes
         --     to campaign-lifecycle's launch workflow)
@@ -912,9 +912,7 @@ contract BindingPathsAreExhaustive {
         --   retry / replan: job-lifecycle re-placement, re-entering
         --     evaluation with constraints assembled at that decision
         --   explicit_host: ExplicitHostBypassesPolicyNotCompatibility
-        --   job_move: job-move.allium (moving a placed job to another host
-        --     is a re-binding and re-enters evaluation)
-        -- A path that writes jobs.host or claims an instance without
+        -- A ninth path that writes jobs.host or claims an instance without
         -- routing through evaluation violates this contract. The coverage
         -- test counterpart should enumerate these paths the way
         -- TestConstraintSystemCoverage enumerates axes.
@@ -1008,17 +1006,16 @@ rule EvaluateEligibility {
     -- error output.
 
     -- 0a. Cordoned targets take no new auto-placed work. (weft instance
-    --     cordon / host-level cordon.) The explicitly_named exception below
-    --     scopes the override to operator-forced --host targeting and is
-    --     audited; auto-placed work (including campaign-lifecycle's
-    --     placement pass, which states its own unconditional cordon rule)
-    --     never receives it.
+    --     cordon / host-level cordon; an explicit --host may override this
+    --     POLICY gate with an audit event — see
+    --     ExplicitHostBypassesPolicyNotCompatibility.)
     requires: target.explicitly_named or not target.cordoned
 
     -- 0b. Overloaded hosts are ineligible; merely busy hosts stay eligible
     --     with a scoring penalty. Implementation: placement.AssessHostLoad —
     --     rejection reasons "host overloaded: <detail>".
-    requires: target.explicitly_named or target.load.state != overloaded
+    requires: (target.explicitly_named
+        and PolicyOverrideAudited(job, target)) or target.load.state != overloaded
 
     -- 1. Opt-in exclusion. Hosts marked opt-in-only in config are
     --    eligible only for jobs that explicitly name them.
@@ -1267,15 +1264,24 @@ rule ExplicitHostBypassesPolicyNotCompatibility {
     -- who forced what onto a cordoned or busy host is a fact worth keeping
     -- (wb113's lesson: unattributed state changes are defects).
     --
-    -- It never overrides COMPATIBILITY axes: required capabilities,
-    -- GPU class/count/memory, compute-capability range, CUDA/driver
-    -- floors, machine pin. Violating those reads as a broken run, not an
-    -- overridden preference.
+    -- Two boundaries on the override:
+    --   * Only OPERATOR cordons are overridable. Automatic health cordons
+    --     (the source-sync wedge cordon, whose drain re-places queued jobs)
+    --     are never overridable: honoring the flag there would defeat the
+    --     drain. explicitly_named is set solely by interactive operator
+    --     targeting at submission — it is not replayed from a persisted
+    --     host override on retry, replan, or hostsync re-placement.
+    --   * The audit event must exist before the override is honored: until
+    --     cmd/run.go's explicit-host path emits it, clauses 0a/0b keep
+    --     holding for explicitly-named jobs too.
     --
-    -- Unknown host facts are not violations: as in clause 1c, an
-    -- inventory record omitting a fact (0) does not disqualify, so --host
-    -- onto a stale-inventory host still works; it fails only on KNOWN
-    -- incompatibility, with placement reasons.
+    -- Unknown host facts: clause 1c's lenience (a record omitting host
+    -- RAM, CPU cores, or carrying no interconnect naming does not
+    -- disqualify) applies on the explicit-host path too, so --host onto a
+    -- stale-inventory host still works. It does NOT extend to the
+    -- fail-closed axes: an unknown compute-capability range or missing
+    -- CUDA/driver facts disqualify under --host exactly as they do on the
+    -- auto-placement path (clauses 4, 5, 5a, 5b).
     requires: CompatibilitySatisfied(host, job.constraints)
         -- compatibility axes: c.required_capabilities subset of
         --   host.capabilities; MatchGPU for class; per-device memory and
@@ -1284,12 +1290,11 @@ rule ExplicitHostBypassesPolicyNotCompatibility {
     if host.cordoned or host.load.state = overloaded or host.opt_in_only:
         ensures: PolicyOverrideAudited(job, host)
 
-    -- legacy annotation: @guidance
-        -- PolicyOverrideAudited is produced by the CLI explicit-host path
-        -- (cmd/run.go --host handling): the submission emits the audit
-        -- event naming the job, host, and operator before the assignment is
-        -- written. Until that emission exists in code, the explicitly_named
-        -- exception must not be honored on cordoned or overloaded targets.
+    -- The PolicyOverrideAudited event is produced by the CLI explicit-host
+    -- path (cmd/run.go --host handling): the submission emits the audit
+    -- event naming the job, host, and operator before the assignment is
+    -- written. Until that emission exists in code, the explicitly_named
+    -- exception must not be honored on cordoned or overloaded targets.
 }
 
 -- =========================================================================

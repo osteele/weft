@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/osteele/weft/internal/r2"
@@ -29,6 +30,10 @@ func (s *stallingStore) PutObject(ctx context.Context, _ string, _ io.Reader, _ 
 	return ctx.Err()
 }
 
+func (s *stallingStore) PutObjectWithPartProgress(ctx context.Context, key string, body io.Reader, contentType string, onPart func(int64)) error {
+	return s.PutObject(ctx, key, body, contentType)
+}
+
 func (s *stallingStore) PutObjectConditional(context.Context, string, io.Reader, string, string, string) (string, error) {
 	return "", nil
 }
@@ -43,6 +48,10 @@ type trickleStore struct {
 func (s *trickleStore) ObjectExists(context.Context, string) (bool, error) { return false, nil }
 func (s *trickleStore) ListObjectsLimited(context.Context, string, int) ([]r2.ObjectInfo, bool, error) {
 	return nil, false, nil
+}
+
+func (s *trickleStore) PutObjectWithPartProgress(ctx context.Context, key string, body io.Reader, contentType string, onPart func(int64)) error {
+	return s.PutObject(ctx, key, body, contentType)
 }
 
 func (s *trickleStore) PutObject(ctx context.Context, _ string, body io.Reader, _ string) error {
@@ -109,6 +118,83 @@ func TestSourceUploadBudgetBaseForEmptyPayload(t *testing.T) {
 	}
 }
 
+// partFeedStore models the multipart shape the wb158 review flagged: the
+// body is consumed once up front (an SDK serving a part from an internal
+// buffer), the transfer then runs slowly with no further body reads, and
+// per-part progress feeds keep the caller informed.
+type partFeedStore struct {
+	feedEvery time.Duration
+	feeds     int
+	transfer  time.Duration // silent tail after the feeds; models the wire time of the final part
+}
+
+func (s *partFeedStore) ObjectExists(context.Context, string) (bool, error) { return false, nil }
+func (s *partFeedStore) ListObjectsLimited(context.Context, string, int) ([]r2.ObjectInfo, bool, error) {
+	return nil, false, nil
+}
+
+func (s *partFeedStore) PutObjectWithPartProgress(ctx context.Context, _ string, body io.Reader, _ string, onPart func(int64)) error {
+	if _, err := io.Copy(io.Discard, body); err != nil {
+		return err
+	}
+	for i := 0; i < s.feeds; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(s.feedEvery):
+		}
+		onPart(16 * 1024 * 1024)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(s.transfer):
+	}
+	return nil
+}
+
+func (s *partFeedStore) PutObject(context.Context, string, io.Reader, string) error {
+	return errors.New("unexpected single-shot PutObject call")
+}
+
+func (s *partFeedStore) PutObjectConditional(context.Context, string, io.Reader, string, string, string) (string, error) {
+	return "", nil
+}
+
+// TestUploadSourceObjectToleratesSlowMultipartWithProgressFeeds pins the
+// wb158 review fix: a multipart transfer that reads the body only up front
+// must survive when per-part progress feeds arrive, because the SDK may
+// serve a part from an internal buffer and read-derived progress goes
+// silent for the whole part transfer.
+func TestUploadSourceObjectToleratesSlowMultipartWithProgressFeeds(t *testing.T) {
+	original := SourceUploadStallTimeout
+	SourceUploadStallTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { SourceUploadStallTimeout = original })
+
+	store := &partFeedStore{feedEvery: 50 * time.Millisecond, feeds: 6, transfer: 50 * time.Millisecond}
+	object := testUploadObject(t, make([]byte, 4096))
+
+	if err := uploadSourceObject(context.Background(), store, object); err != nil {
+		t.Fatalf("multipart upload with progress feeds failed: %v", err)
+	}
+}
+
+// TestUploadSourceObjectStillTripsWithoutProgressFeeds is the complement: the
+// progress feed is what keeps the watchdog alive. The same slow transfer
+// without feeds must still fail as stalled.
+func TestUploadSourceObjectStillTripsWithoutProgressFeeds(t *testing.T) {
+	original := SourceUploadStallTimeout
+	SourceUploadStallTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { SourceUploadStallTimeout = original })
+
+	store := &partFeedStore{feeds: 0, transfer: 600 * time.Millisecond}
+	object := testUploadObject(t, make([]byte, 4096))
+
+	if err := uploadSourceObject(context.Background(), store, object); !errors.Is(err, ErrSourceUploadStalled) {
+		t.Fatalf("expected ErrSourceUploadStalled without progress feeds, got %v", err)
+	}
+}
+
 // TestUploadSourceObjectFailsFastOnStall covers the reported failure shape: a
 // transfer that moves no bytes must fail promptly, by name, rather than run out
 // an unrelated wall-clock budget and surface as a canceled PutObject.
@@ -120,16 +206,14 @@ func TestUploadSourceObjectFailsFastOnStall(t *testing.T) {
 	store := &stallingStore{started: make(chan struct{})}
 	object := testUploadObject(t, []byte("payload"))
 
-	start := time.Now()
-	err := uploadSourceObject(context.Background(), store, object)
-	elapsed := time.Since(start)
-
-	if !errors.Is(err, ErrSourceUploadStalled) {
-		t.Fatalf("expected ErrSourceUploadStalled, got %v", err)
-	}
-	if elapsed > 5*time.Second {
-		t.Errorf("stall detection took %s, expected to trip near the stall window", elapsed)
-	}
+	// The bubble fakes the clock, so the 150 ms window elapses instantly and
+	// the test is free of scheduling flake regardless of machine load.
+	synctest.Test(t, func(t *testing.T) {
+		err := uploadSourceObject(context.Background(), store, object)
+		if !errors.Is(err, ErrSourceUploadStalled) {
+			t.Errorf("expected ErrSourceUploadStalled, got %v", err)
+		}
+	})
 }
 
 // TestUploadSourceObjectToleratesSlowProgress is the other half: the watchdog
@@ -143,13 +227,11 @@ func TestUploadSourceObjectToleratesSlowProgress(t *testing.T) {
 	store := &trickleStore{step: 50 * time.Millisecond, steps: 12}
 	object := testUploadObject(t, make([]byte, 4096))
 
-	start := time.Now()
-	if err := uploadSourceObject(context.Background(), store, object); err != nil {
-		t.Fatalf("slow but progressing upload failed: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed < SourceUploadStallTimeout {
-		t.Fatalf("upload finished in %s, too fast to have outlived the stall window", elapsed)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		if err := uploadSourceObject(context.Background(), store, object); err != nil {
+			t.Errorf("slow but progressing upload failed: %v", err)
+		}
+	})
 }
 
 // TestUploadSourceObjectPropagatesCallerCancellation keeps a user abort
@@ -163,16 +245,19 @@ func TestUploadSourceObjectPropagatesCallerCancellation(t *testing.T) {
 	object := testUploadObject(t, []byte("payload"))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-store.started
-		cancel()
-	}()
+	var err error
+	synctest.Test(t, func(t *testing.T) {
+		go func() {
+			<-store.started
+			cancel()
+		}()
+		err = uploadSourceObject(ctx, store, object)
+	})
 
-	err := uploadSourceObject(ctx, store, object)
 	if errors.Is(err, ErrSourceUploadStalled) {
-		t.Fatalf("caller cancellation misreported as a stall: %v", err)
+		t.Errorf("caller cancellation misreported as a stall: %v", err)
 	}
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
+		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }

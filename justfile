@@ -102,8 +102,13 @@ install:
         GOPATH_VALUE="$(go env GOPATH)"
         GOBIN_DIR="${GOPATH_VALUE%%:*}/bin"
     fi
+    # A dev-build CLI whose agent cannot be built (and is not already cached)
+    # cannot deploy agents; warn-and-continue would leave an install that
+    # looks complete but is not, so the recipe fails instead. The background
+    # prewarm above stays best-effort.
     if ! "${GOBIN_DIR}/weft" build-agents --targets linux-amd64 --from-source --record-installed-identity; then
-        echo "warning: agent prewarm and identity recording failed; installed CLI and docs remain available"
+        echo "error: agent build and identity recording failed; the install is incomplete" >&2
+        exit 1
     fi
     if [ -f "${HOME}/Library/LaunchAgents/com.osteele.weft.daemon.plist" ]; then
         echo "Updating daemon service and transitioning to installed binary..."

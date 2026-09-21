@@ -52,7 +52,7 @@ func TestMachineSurfaceFieldSets(t *testing.T) {
 	assertJSONFieldSet(t, "host_list envelope", hostListJSONEnvelope{}, []string{"hosts", "kind", "source", "version"})
 	assertJSONFieldSet(t, "host_list row", hostListJSONRow{}, []string{"capabilities", "capability_observations", "name", "ssh_identity_file", "ssh_target", "type"})
 	assertJSONFieldSet(t, "autopilot_status document", autopilotStateView{}, []string{
-		"active_binary_path", "active_binary_stale", "active_runner_host",
+		"active_binary_mtime", "active_binary_path", "active_binary_size", "active_binary_stale", "active_runner_host",
 		"active_runner_label", "active_runner_pid",
 		"blocked_on_price_authorization", "heartbeat_age_seconds",
 		"heartbeat_at", "incidents", "kind", "last_pass_duration_ms",

@@ -84,6 +84,10 @@ func formatLivePlacementDiagnosis(diagnosis campaign.PlacementDiagnosis) string 
 	b.WriteString(formatPlacementProbe(diagnosis.Exact))
 	b.WriteByte('\n')
 	if diagnosis.Exact.Offer != nil {
+		if note := formatAdmissionNote(diagnosis.Exact); note != "" {
+			b.WriteString(note)
+			b.WriteByte('\n')
+		}
 		b.WriteString("  The recorded blocker may clear on the next autopilot pass.\n")
 	} else if len(diagnosis.Counterfactuals) == 0 {
 		if len(diagnosis.TestedConstraints) > 0 {
@@ -120,6 +124,27 @@ func formatPlacementProbe(probe campaign.PlacementProbe) string {
 		return campaign.SanitizeBlockedReason(probe.Detail)
 	}
 	return "no viable offer"
+}
+
+// formatAdmissionNote states the constraint check that admitted a quoted
+// offer. Quoting an offer without the admitting check reads as misrouting —
+// a GPU offer quoted as the exact match for a CPU-only job made a reporter
+// check whether they had mis-submitted (wb163). The searched-constraint list
+// is the same predicate list the zero-offers branch reports, so the admitted
+// and rejected directions describe the same filter chain.
+func formatAdmissionNote(probe campaign.PlacementProbe) string {
+	var parts []string
+	if probe.SearchConstraints != "" {
+		parts = append(parts, "it satisfies the searched constraints ("+probe.SearchConstraints+")")
+	}
+	if probe.RawCount > 0 && probe.KeptCount > 0 {
+		parts = append(parts, fmt.Sprintf("%s found, %d passed all filters and it ranked first",
+			offerNoun(probe.RawCount), probe.KeptCount))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  Admitted because " + strings.Join(parts, "; ") + "."
 }
 
 func formatCounterfactualProbe(exact, probe campaign.PlacementProbe) string {

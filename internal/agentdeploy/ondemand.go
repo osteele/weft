@@ -154,16 +154,24 @@ func resolveBuilders(goos, goarch string) ([]config.AgentBuilder, error) {
 	}
 
 	// Compatibility fallback: existing WEFT_* environment variables.
-	root, _ := RepoRoot()
+	root, _ := repoRootFunc()
 	repoEnv := map[string]string{}
 	if root != "" {
 		repoEnv = loadRepoEnvVars(root)
 	}
+	// The repo env file is only visible to processes started in (or compiled
+	// from) a checkout that carries it; installs from a jj workspace and the
+	// daemon are neither, so without a config-dir fallback they resolve zero
+	// builders. Precedence: process env > repo env file > config-dir env file.
+	configEnv := loadConfigEnvVars()
 	env := func(key string) string {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 			return v
 		}
-		return strings.TrimSpace(repoEnv[key])
+		if v := strings.TrimSpace(repoEnv[key]); v != "" {
+			return v
+		}
+		return strings.TrimSpace(configEnv[key])
 	}
 
 	var out []config.AgentBuilder

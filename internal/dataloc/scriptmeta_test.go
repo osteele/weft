@@ -32,6 +32,19 @@ import torch
 			},
 		},
 		{
+			name: "watchdog timeout overrides",
+			content: `# /// script
+# [tool.weft]
+# gpu-idle-timeout = "45m"
+# stdout-silence-timeout = "off"
+# ///
+`,
+			want: &ScriptMeta{
+				GPUIdleTimeout:       "45m",
+				StdoutSilenceTimeout: "off",
+			},
+		},
+		{
 			name: "gpu-mem integer",
 			content: `# /// script
 # [tool.weft]

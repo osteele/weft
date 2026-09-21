@@ -142,6 +142,8 @@ var (
 	runMaxSpend                 string
 	runMaxTime                  string
 	runWallTime                 string
+	runGPUIdleTimeout           string
+	runStdoutSilenceTimeout     string
 	runGracePeriod              string
 	runMinSurvival              float64
 	runInputs                   []string
@@ -449,35 +451,42 @@ func normalizedPythonScripts(command string) []string {
 }
 
 type draftRunParams struct {
-	Config           *config.Config
-	Host             string
-	WorkingDir       string
-	Command          string
-	Description      string
-	ProjectName      string
-	EnvVars          []string
-	Tags             []string
-	GPU              string
-	GPUClass         string
-	GPUMemGB         *int
-	GPUMemMaxGB      *int
-	MaxComputeCap    string
-	SubmitterSession string
-	CLIOverrides     *db.CLIResourceOverrides
-	Inputs           []string
-	Payloads         []db.JobPayload
-	BestEffortInputs []string
-	Outputs          []string
-	OutputDirs       []string
-	Produces         []string
-	Needs            []string
-	Disk             *db.JobDiskMetadata
-	Source           *db.JobSourceMetadata
-	WallTimeSeconds  int
+	Config                      *config.Config
+	Host                        string
+	WorkingDir                  string
+	Command                     string
+	Description                 string
+	ProjectName                 string
+	EnvVars                     []string
+	Tags                        []string
+	GPU                         string
+	GPUClass                    string
+	GPUMemGB                    *int
+	GPUMemMaxGB                 *int
+	MaxComputeCap               string
+	SubmitterSession            string
+	CLIOverrides                *db.CLIResourceOverrides
+	Inputs                      []string
+	Payloads                    []db.JobPayload
+	BestEffortInputs            []string
+	Outputs                     []string
+	OutputDirs                  []string
+	Produces                    []string
+	Needs                       []string
+	Disk                        *db.JobDiskMetadata
+	Source                      *db.JobSourceMetadata
+	WallTimeSeconds             int
+	GPUIdleTimeoutSeconds       *int
+	StdoutSilenceTimeoutSeconds *int
 }
 
 func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunParams) error {
-	metadata := &db.JobMetadata{Source: params.Source, WallTimeSeconds: params.WallTimeSeconds}
+	metadata := &db.JobMetadata{
+		Source:                      params.Source,
+		WallTimeSeconds:             params.WallTimeSeconds,
+		GPUIdleTimeoutSeconds:       params.GPUIdleTimeoutSeconds,
+		StdoutSilenceTimeoutSeconds: params.StdoutSilenceTimeoutSeconds,
+	}
 	jobID, err := ops.RecordDraftJob(database, ops.QueueJobParams{
 		Host:             params.Host,
 		WorkingDir:       params.WorkingDir,
@@ -577,6 +586,8 @@ func init() {
 	runCmd.Flags().StringVar(&runMaxSpend, "max-spend", "", "Maximum total rental spend in USD; 0 clears")
 	runCmd.Flags().StringVar(&runMaxTime, "max-time", "", "Maximum rental lifetime (for example, 3h); 0 clears")
 	runCmd.Flags().StringVar(&runWallTime, "wall-time", "", "Maximum job wall-clock time including setup (for example, 2h); 0 clears")
+	runCmd.Flags().StringVar(&runGPUIdleTimeout, "gpu-idle-timeout", "", "Kill the job after this much all-GPU-idle time (for example, 45m); 0/off disables; default picks by host cost")
+	runCmd.Flags().StringVar(&runStdoutSilenceTimeout, "stdout-silence-timeout", "", "Kill the job after this much log silence (for example, 40m); 0/off disables; default picks by host cost")
 	runCmd.Flags().StringVar(&runGracePeriod, "grace-period", "", "Keep a failed rental alive for this duration; 0 disables, default clears")
 	runCmd.Flags().Float64Var(&runMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; 0 disables; distinct from provider reliability)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
@@ -703,6 +714,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 			effectiveWallTimeSeconds = *parsedWallTime
 		}
 	}
+	effectiveGPUIdleTimeoutSeconds, err := parseWatchdogTimeoutFlag(cmd, "gpu-idle-timeout", runGPUIdleTimeout)
+	if err != nil {
+		return err
+	}
+	effectiveStdoutSilenceTimeoutSeconds, err := parseWatchdogTimeoutFlag(cmd, "stdout-silence-timeout", runStdoutSilenceTimeout)
+	if err != nil {
+		return err
+	}
 
 	// Open database early for --from support
 	var database *sql.DB
@@ -794,6 +813,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if !cmd.Flags().Changed("wall-time") && fromJob.Metadata != nil {
 			effectiveWallTimeSeconds = fromJob.Metadata.WallTimeSeconds
+		}
+		if fromJob.Metadata != nil {
+			if !cmd.Flags().Changed("gpu-idle-timeout") {
+				effectiveGPUIdleTimeoutSeconds = fromJob.Metadata.GPUIdleTimeoutSeconds
+			}
+			if !cmd.Flags().Changed("stdout-silence-timeout") {
+				effectiveStdoutSilenceTimeoutSeconds = fromJob.Metadata.StdoutSilenceTimeoutSeconds
+			}
 		}
 		if len(runEnvVars) == 0 {
 			runEnvVars = append([]string(nil), fromJob.EnvVars...)
@@ -1069,6 +1096,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 				effectiveWallTimeSeconds = *parsedWallTime
 				applied = append(applied, fmt.Sprintf("wall-time=%s", time.Duration(effectiveWallTimeSeconds)*time.Second))
 			}
+		}
+		if !cmd.Flags().Changed("gpu-idle-timeout") && meta.GPUIdleTimeout != "" {
+			parsed, parseErr := parseWatchdogTimeoutOverride("gpu-idle-timeout", meta.GPUIdleTimeout)
+			if parseErr != nil {
+				return fmt.Errorf("script metadata: %w", parseErr)
+			}
+			effectiveGPUIdleTimeoutSeconds = parsed
+			applied = append(applied, fmt.Sprintf("gpu-idle-timeout=%s", formatWatchdogTimeoutOverride(parsed)))
+		}
+		if !cmd.Flags().Changed("stdout-silence-timeout") && meta.StdoutSilenceTimeout != "" {
+			parsed, parseErr := parseWatchdogTimeoutOverride("stdout-silence-timeout", meta.StdoutSilenceTimeout)
+			if parseErr != nil {
+				return fmt.Errorf("script metadata: %w", parseErr)
+			}
+			effectiveStdoutSilenceTimeoutSeconds = parsed
+			applied = append(applied, fmt.Sprintf("stdout-silence-timeout=%s", formatWatchdogTimeoutOverride(parsed)))
 		}
 		if len(meta.Inputs) > 0 {
 			runInputs = mergeDedup(runInputs, meta.Inputs)
@@ -1526,10 +1569,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Needs:            resolvedNeeds,
 			Disk:             diskMeta,
 			Metadata: &db.JobMetadata{
-				Source:          sourceMeta,
-				Agent:           agentMetadata,
-				SubmissionNonce: submissionNonce,
-				WallTimeSeconds: effectiveWallTimeSeconds,
+				Source:                      sourceMeta,
+				Agent:                       agentMetadata,
+				SubmissionNonce:             submissionNonce,
+				WallTimeSeconds:             effectiveWallTimeSeconds,
+				GPUIdleTimeoutSeconds:       effectiveGPUIdleTimeoutSeconds,
+				StdoutSilenceTimeoutSeconds: effectiveStdoutSilenceTimeoutSeconds,
 			},
 			CLIOverrides:     cliOverrides,
 			MaxComputeCap:    persistMaxComputeCap,
@@ -1922,31 +1967,33 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if runDraft {
 		return recordDraftRunJob(cmd, database, draftRunParams{
-			Config:           cfg,
-			Host:             host,
-			WorkingDir:       workingDir,
-			Command:          command,
-			Description:      runDescription,
-			ProjectName:      projectName,
-			SubmitterSession: runSubmitterSession,
-			EnvVars:          runEnvVars,
-			Tags:             runTags,
-			GPU:              gpu,
-			GPUClass:         gpuClass,
-			GPUMemGB:         resolvedGPUMemGB,
-			GPUMemMaxGB:      resolvedGPUMemMaxGB,
-			MaxComputeCap:    persistMaxComputeCap,
-			CLIOverrides:     cliOverrides,
-			Inputs:           runInputs,
-			Payloads:         capturedPayloads,
-			BestEffortInputs: bestEffortInputs,
-			Outputs:          runOutputs,
-			OutputDirs:       outputDirs,
-			Produces:         runProduces,
-			Needs:            resolvedNeeds,
-			Disk:             diskMeta,
-			Source:           sourceMeta,
-			WallTimeSeconds:  effectiveWallTimeSeconds,
+			Config:                      cfg,
+			Host:                        host,
+			WorkingDir:                  workingDir,
+			Command:                     command,
+			Description:                 runDescription,
+			ProjectName:                 projectName,
+			SubmitterSession:            runSubmitterSession,
+			EnvVars:                     runEnvVars,
+			Tags:                        runTags,
+			GPU:                         gpu,
+			GPUClass:                    gpuClass,
+			GPUMemGB:                    resolvedGPUMemGB,
+			GPUMemMaxGB:                 resolvedGPUMemMaxGB,
+			MaxComputeCap:               persistMaxComputeCap,
+			CLIOverrides:                cliOverrides,
+			Inputs:                      runInputs,
+			Payloads:                    capturedPayloads,
+			BestEffortInputs:            bestEffortInputs,
+			Outputs:                     runOutputs,
+			OutputDirs:                  outputDirs,
+			Produces:                    runProduces,
+			Needs:                       resolvedNeeds,
+			Disk:                        diskMeta,
+			Source:                      sourceMeta,
+			WallTimeSeconds:             effectiveWallTimeSeconds,
+			GPUIdleTimeoutSeconds:       effectiveGPUIdleTimeoutSeconds,
+			StdoutSilenceTimeoutSeconds: effectiveStdoutSilenceTimeoutSeconds,
 		})
 	}
 
@@ -2033,39 +2080,41 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		endSubmit := rec.Phase("submit", "queueing dependent job")
 		res, err := queueJob(database, queueJobOptions{
-			Host:             host,
-			WorkingDir:       workingDir,
-			Command:          command,
-			Description:      runDescription,
-			Project:          projectName,
-			SubmitterSession: runSubmitterSession,
-			EnvVars:          runEnvVars,
-			Tags:             runTags,
-			GPU:              gpu,
-			GPUClass:         gpuClass,
-			GPUMemGB:         resolvedGPUMemGB,
-			GPUMemMaxGB:      resolvedGPUMemMaxGB,
-			CPUCores:         runCPUCores,
-			CPUMemGB:         db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
-			Interconnect:     runInterconnect,
-			Dependencies:     deps,
-			CPUReserveCores:  runCPUReserve,
-			SetupPolicy:      runSetupPolicy,
-			AutoStart:        true,
-			Inputs:           runInputs,
-			BestEffortInputs: bestEffortInputs,
-			Outputs:          runOutputs,
-			OutputDirs:       outputDirs,
-			Produces:         runProduces,
-			Needs:            resolvedNeeds,
-			Payloads:         capturedPayloads,
-			CloudAfter:       cloudAfter,
-			GPUMemStrict:     true, // GPUMemGB is already resolved above; avoid re-applying headroom.
-			Disk:             diskMeta,
-			Source:           sourceMeta,
-			WallTimeSeconds:  effectiveWallTimeSeconds,
-			CLIOverrides:     cliOverrides,
-			MaxComputeCap:    persistMaxComputeCap,
+			Host:                        host,
+			WorkingDir:                  workingDir,
+			Command:                     command,
+			Description:                 runDescription,
+			Project:                     projectName,
+			SubmitterSession:            runSubmitterSession,
+			EnvVars:                     runEnvVars,
+			Tags:                        runTags,
+			GPU:                         gpu,
+			GPUClass:                    gpuClass,
+			GPUMemGB:                    resolvedGPUMemGB,
+			GPUMemMaxGB:                 resolvedGPUMemMaxGB,
+			CPUCores:                    runCPUCores,
+			CPUMemGB:                    db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
+			Interconnect:                runInterconnect,
+			Dependencies:                deps,
+			CPUReserveCores:             runCPUReserve,
+			SetupPolicy:                 runSetupPolicy,
+			AutoStart:                   true,
+			Inputs:                      runInputs,
+			BestEffortInputs:            bestEffortInputs,
+			Outputs:                     runOutputs,
+			OutputDirs:                  outputDirs,
+			Produces:                    runProduces,
+			Needs:                       resolvedNeeds,
+			Payloads:                    capturedPayloads,
+			CloudAfter:                  cloudAfter,
+			GPUMemStrict:                true, // GPUMemGB is already resolved above; avoid re-applying headroom.
+			Disk:                        diskMeta,
+			Source:                      sourceMeta,
+			WallTimeSeconds:             effectiveWallTimeSeconds,
+			GPUIdleTimeoutSeconds:       effectiveGPUIdleTimeoutSeconds,
+			StdoutSilenceTimeoutSeconds: effectiveStdoutSilenceTimeoutSeconds,
+			CLIOverrides:                cliOverrides,
+			MaxComputeCap:               persistMaxComputeCap,
 		})
 		endSubmit()
 		if err != nil {

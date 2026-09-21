@@ -1544,6 +1544,16 @@ func appendPrewarmLogForFailure(jobLog, prewarmLog string) {
 
 func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, jobMaxTime time.Duration) runner.SingleJobConfig {
 	gpuIdle, stdoutSilence := pickWatchdogTimeouts(cfg.CostPerHourCents)
+	// A job-declared timeout overrides the cost-tier pick; a declared zero
+	// disables that watchdog. Absent fields keep the tier default. Older
+	// agents ignore the manifest fields entirely, so a submitted override on
+	// an outdated agent silently reverts to the tier default.
+	if job.GPUIdleTimeoutSeconds != nil {
+		gpuIdle = time.Duration(*job.GPUIdleTimeoutSeconds) * time.Second
+	}
+	if job.StdoutSilenceTimeoutSeconds != nil {
+		stdoutSilence = time.Duration(*job.StdoutSilenceTimeoutSeconds) * time.Second
+	}
 	setupTimeout := pickSetupTimeout(cfg)
 	env := agentRentalEnv(cfg)
 	env = appendAgentJobEnv(env, job)

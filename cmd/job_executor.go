@@ -95,40 +95,42 @@ type queueJobResult struct {
 
 // queueJobOptions controls adding a job to a remote queue.
 type queueJobOptions struct {
-	Host             string
-	WorkingDir       string
-	Command          string
-	Description      string
-	Project          string
-	SubmitterSession string
-	EnvVars          []string
-	Tags             []string
-	GPU              string // Explicit GPU setting (extracted from EnvVars or set directly)
-	GPUClass         string // GPU class name (e.g., "A100") — resolved to device at runtime
-	GPUMemGB         *int   // GPU memory reservation in GB per device
-	GPUMemStrict     bool   // Apply exact GPU memory floor when resolving from explicit GPUMemGB.
-	GPUMemMaxGB      *int   // Legacy GPU memory upper metadata; ignored by placement
-	CPUCores         int
-	CPUMemGB         int
-	CPUReserveCores  int
-	SetupPolicy      string
-	Interconnect     string
-	Dependencies     []queueDependency
-	AutoStart        bool
-	Inputs           []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
-	BestEffortInputs []string
-	Outputs          []string // Data asset refs (e.g., "checkpoint:llama-ft-v1")
-	OutputDirs       []string // Convention-based output directories from .weft.toml
-	Produces         []string // Artifact specs this job produces
-	Needs            []string // Artifact specs this job needs
-	Payloads         []db.JobPayload
-	CloudAfter       []db.JobDependencyRef
-	CloudNeeds       []string
-	Disk             *db.JobDiskMetadata
-	Source           *db.JobSourceMetadata
-	WallTimeSeconds  int
-	CLIOverrides     *db.CLIResourceOverrides
-	MaxComputeCap    string
+	Host                        string
+	WorkingDir                  string
+	Command                     string
+	Description                 string
+	Project                     string
+	SubmitterSession            string
+	EnvVars                     []string
+	Tags                        []string
+	GPU                         string // Explicit GPU setting (extracted from EnvVars or set directly)
+	GPUClass                    string // GPU class name (e.g., "A100") — resolved to device at runtime
+	GPUMemGB                    *int   // GPU memory reservation in GB per device
+	GPUMemStrict                bool   // Apply exact GPU memory floor when resolving from explicit GPUMemGB.
+	GPUMemMaxGB                 *int   // Legacy GPU memory upper metadata; ignored by placement
+	CPUCores                    int
+	CPUMemGB                    int
+	CPUReserveCores             int
+	SetupPolicy                 string
+	Interconnect                string
+	Dependencies                []queueDependency
+	AutoStart                   bool
+	Inputs                      []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
+	BestEffortInputs            []string
+	Outputs                     []string // Data asset refs (e.g., "checkpoint:llama-ft-v1")
+	OutputDirs                  []string // Convention-based output directories from .weft.toml
+	Produces                    []string // Artifact specs this job produces
+	Needs                       []string // Artifact specs this job needs
+	Payloads                    []db.JobPayload
+	CloudAfter                  []db.JobDependencyRef
+	CloudNeeds                  []string
+	Disk                        *db.JobDiskMetadata
+	Source                      *db.JobSourceMetadata
+	WallTimeSeconds             int
+	GPUIdleTimeoutSeconds       *int
+	StdoutSilenceTimeoutSeconds *int
+	CLIOverrides                *db.CLIResourceOverrides
+	MaxComputeCap               string
 }
 
 type queueDependency struct {
@@ -310,7 +312,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Produces:         opts.Produces,
 		Needs:            opts.Needs,
 		Payloads:         opts.Payloads,
-		Metadata:         buildJobExecutorMetadata(opts.CloudAfter, opts.CloudNeeds, opts.Source, opts.WallTimeSeconds),
+		Metadata:         buildJobExecutorMetadata(opts.CloudAfter, opts.CloudNeeds, opts.Source, opts.WallTimeSeconds, opts.GPUIdleTimeoutSeconds, opts.StdoutSilenceTimeoutSeconds),
 		Disk:             opts.Disk,
 		CLIOverrides:     cliOverrides,
 		MaxComputeCap:    opts.MaxComputeCap,
@@ -327,9 +329,9 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	}, nil
 }
 
-func buildJobExecutorMetadata(cloudAfter []db.JobDependencyRef, cloudNeeds []string, source *db.JobSourceMetadata, wallTimeSeconds int) *db.JobMetadata {
+func buildJobExecutorMetadata(cloudAfter []db.JobDependencyRef, cloudNeeds []string, source *db.JobSourceMetadata, wallTimeSeconds int, gpuIdleTimeoutSeconds, stdoutSilenceTimeoutSeconds *int) *db.JobMetadata {
 	meta := buildCloudDependencyMetadata(cloudAfter, cloudNeeds)
-	if meta == nil && source == nil && wallTimeSeconds <= 0 {
+	if meta == nil && source == nil && wallTimeSeconds <= 0 && gpuIdleTimeoutSeconds == nil && stdoutSilenceTimeoutSeconds == nil {
 		return nil
 	}
 	if meta == nil {
@@ -337,6 +339,8 @@ func buildJobExecutorMetadata(cloudAfter []db.JobDependencyRef, cloudNeeds []str
 	}
 	meta.Source = source
 	meta.WallTimeSeconds = wallTimeSeconds
+	meta.GPUIdleTimeoutSeconds = gpuIdleTimeoutSeconds
+	meta.StdoutSilenceTimeoutSeconds = stdoutSilenceTimeoutSeconds
 	return meta
 }
 

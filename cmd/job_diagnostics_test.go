@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -297,4 +298,89 @@ func TestJobDiagnosticsWithDatabaseHandlesMissingLaunch(t *testing.T) {
 	printLaunchTerminationDetail(io.Discard, database, job)
 	printJobPhasesAndPeaks(io.Discard, database, job)
 	printJobLocalDiagnostics(io.Discard, database, job)
+}
+
+// Regression (wb161): a preflight rejection persists the runner's
+// "<reason>: <cause>" detail as a dispatch-failed lifecycle event; `weft
+// info` must render that cause next to the classified Reason line instead of
+// leaving it only in the job log.
+func TestRenderJobInfoShowsPreflightFailureCause(t *testing.T) {
+	recordRejected := func(t *testing.T, database *sql.DB, reason, detail string, eventAt int64) *db.Job {
+		t.Helper()
+		jobID, err := db.RecordQueued(database, "test-host", "/tmp", "echo test", "preflight rejected")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := db.SetJobRemoteState(database, jobID, "", reason); err != nil {
+			t.Fatalf("SetJobRemoteState: %v", err)
+		}
+		if detail != "" {
+			if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind: db.EventQueueDispatchFailed, JobID: jobID,
+				Detail: detail, OccurredAt: eventAt,
+			}); err != nil {
+				t.Fatalf("InsertLifecycleEvent: %v", err)
+			}
+		}
+		if err := db.CloseAttempt(database, jobID, db.StatusFailed, nil, time.Now().Unix()); err != nil {
+			t.Fatalf("CloseAttempt: %v", err)
+		}
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			t.Fatalf("GetJobByID: %v", err)
+		}
+		return job
+	}
+	render := func(t *testing.T, database *sql.DB, job *db.Job) string {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		if err := renderJobInfoFromLedger(&out, &errOut, database, job); err != nil {
+			t.Fatalf("renderJobInfoFromLedger: %v", err)
+		}
+		return out.String()
+	}
+
+	t.Run("renders the underlying cause", func(t *testing.T) {
+		database := db.SetupTestDB(t)
+		job := recordRejected(t, database, db.FailureReasonPinnedSourceFetchFailed,
+			"pinned_source_fetch_failed: mkdir /srv/rules: permission denied", time.Now().Unix())
+		output := render(t, database, job)
+		if !strings.Contains(output, "Reason:      pinned source fetch failed\n") {
+			t.Fatalf("missing classified Reason line:\n%s", output)
+		}
+		if !strings.Contains(output, "Cause:       mkdir /srv/rules: permission denied\n") {
+			t.Fatalf("missing cause line:\n%s", output)
+		}
+	})
+
+	t.Run("no dispatch failure event, no cause line", func(t *testing.T) {
+		database := db.SetupTestDB(t)
+		job := recordRejected(t, database, db.FailureReasonPinnedSourceFetchFailed, "", 0)
+		output := render(t, database, job)
+		if strings.Contains(output, "Cause:") {
+			t.Fatalf("cause rendered without a dispatch failure event:\n%s", output)
+		}
+	})
+
+	t.Run("event that only repeats the classification renders nothing", func(t *testing.T) {
+		database := db.SetupTestDB(t)
+		job := recordRejected(t, database, db.FailureReasonPinnedSourceFetchFailed,
+			db.FailureReasonPinnedSourceFetchFailed, time.Now().Unix())
+		output := render(t, database, job)
+		if strings.Contains(output, "Cause:") {
+			t.Fatalf("cause rendered for classification-only detail:\n%s", output)
+		}
+	})
+
+	t.Run("stale event from before this attempt is not surfaced", func(t *testing.T) {
+		database := db.SetupTestDB(t)
+		// The event predates the job's QueuedAt, so the dispatch-run floor
+		// excludes it: it belongs to an earlier queueing of the job.
+		job := recordRejected(t, database, db.FailureReasonPinnedSourceFetchFailed,
+			"pinned_source_fetch_failed: mkdir /srv/old: permission denied", time.Now().Add(-time.Hour).Unix())
+		output := render(t, database, job)
+		if strings.Contains(output, "Cause:") {
+			t.Fatalf("stale pre-attempt cause rendered:\n%s", output)
+		}
+	})
 }

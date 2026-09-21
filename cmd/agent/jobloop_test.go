@@ -1305,3 +1305,52 @@ func TestOutputWindowStartForJob_RestagedDisablesWindow(t *testing.T) {
 		t.Errorf("outputWindowStartForJob(restaged) = %d, want 0 (window disabled)", got)
 	}
 }
+
+func TestSingleJobConfigForAgentJob_JobWatchdogOverride(t *testing.T) {
+	baseCfg := jobSequenceConfig{
+		R2Bucket:         "bucket",
+		LogDir:           "/tmp/logs",
+		StartTime:        time.Now(),
+		CostPerHourCents: 350, // expensive tier: 8m gpu-idle / 12m silence
+	}
+
+	t.Run("declared override beats the cost tier", func(t *testing.T) {
+		idle := 2700 // 45m
+		job := cloud.AgentJob{
+			ID:                    7,
+			Command:               "python verify.py",
+			GPUIdleTimeoutSeconds: &idle,
+		}
+		got := singleJobConfigForAgentJob(job, baseCfg, "/tmp/work", 0)
+		if got.GPUIdleTimeout != 45*time.Minute {
+			t.Fatalf("gpu-idle timeout = %s, want 45m", got.GPUIdleTimeout)
+		}
+		if got.StdoutSilenceTimeout != 12*time.Minute {
+			t.Fatalf("silence timeout = %s, want the 12m cost tier", got.StdoutSilenceTimeout)
+		}
+	})
+
+	t.Run("zero disables the watchdog", func(t *testing.T) {
+		off := 0
+		job := cloud.AgentJob{
+			ID:                          8,
+			Command:                     "python verify.py",
+			StdoutSilenceTimeoutSeconds: &off,
+		}
+		got := singleJobConfigForAgentJob(job, baseCfg, "/tmp/work", 0)
+		if got.StdoutSilenceTimeout != 0 {
+			t.Fatalf("silence timeout = %s, want 0 (disabled)", got.StdoutSilenceTimeout)
+		}
+		if got.GPUIdleTimeout != 8*time.Minute {
+			t.Fatalf("gpu-idle timeout = %s, want the 8m cost tier", got.GPUIdleTimeout)
+		}
+	})
+
+	t.Run("absent override keeps the cost tier", func(t *testing.T) {
+		job := cloud.AgentJob{ID: 9, Command: "python verify.py"}
+		got := singleJobConfigForAgentJob(job, baseCfg, "/tmp/work", 0)
+		if got.GPUIdleTimeout != 8*time.Minute || got.StdoutSilenceTimeout != 12*time.Minute {
+			t.Fatalf("timeouts = %s/%s, want 8m/12m", got.GPUIdleTimeout, got.StdoutSilenceTimeout)
+		}
+	})
+}
