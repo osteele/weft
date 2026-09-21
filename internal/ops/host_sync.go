@@ -1387,6 +1387,14 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		} else if job.WorkingDir != "" {
 			sourceSHA256 = sourceSHAByDir[workdir.ToTildeRelative(job.WorkingDir)]
 		}
+		if stateErr != nil {
+			// The state fetch itself failed. Report the real error: a
+			// nil-state protocol message would name a remedy (`weft queue
+			// update`) that cannot fix a publish-side or transport failure
+			// (wb164).
+			recordDeferred(job.ID, "queue runner state unavailable", stateErr)
+			continue
+		}
 		if protocolErr := queueProtocolCompatibilityError(host, state); protocolErr != nil {
 			recordDeferred(job.ID, protocolErr.Error(), nil)
 			continue

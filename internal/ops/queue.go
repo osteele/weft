@@ -102,34 +102,36 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 	command := payloadGuardedCommand(job.Command, payloads)
 	command = artifactNeedsGuardedCommand(command, artifactNeeds)
 	entry := opsqueue.QueueEntry{
-		JobID:            job.ID,
-		RunID:            runID,
-		WorkingDir:       job.WorkingDir,
-		Command:          command,
-		Description:      job.Description,
-		SourceSHA256:     sourceSHA256,
-		SourceR2Key:      sourceR2Key,
-		SourceManifest:   sourceManifest,
-		EnvVars:          job.EnvVars,
-		DepSpec:          job.DepSpec,
-		CPUAllotment:     job.CPUAllotment,
-		GPU:              job.GPU,
-		GPUClass:         job.GPUClass,
-		GPUCount:         job.RequestedGPUCount(),
-		GPUMemGB:         job.GPUMemGB,
-		Interconnect:     job.RequestedInterconnect(),
-		CPUCores:         job.RequestedCPUCores(),
-		CPUReserveCores:  job.RequestedCPUReserveCores(),
-		RAMReservationKB: jobRAMReservationKB(job),
-		WallTimeSeconds:  int(job.WallTime() / time.Second),
-		Tags:             job.Tags,
-		OutputDirs:       job.OutputDirs,
-		Outputs:          job.Outputs,
-		Produces:         job.Produces,
-		Needs:            job.Needs,
-		ArtifactNeeds:    artifactNeeds,
-		Payloads:         payloads,
-		SetupPolicy:      job.SetupPolicy,
+		JobID:                       job.ID,
+		RunID:                       runID,
+		WorkingDir:                  job.WorkingDir,
+		Command:                     command,
+		Description:                 job.Description,
+		SourceSHA256:                sourceSHA256,
+		SourceR2Key:                 sourceR2Key,
+		SourceManifest:              sourceManifest,
+		EnvVars:                     job.EnvVars,
+		DepSpec:                     job.DepSpec,
+		CPUAllotment:                job.CPUAllotment,
+		GPU:                         job.GPU,
+		GPUClass:                    job.GPUClass,
+		GPUCount:                    job.RequestedGPUCount(),
+		GPUMemGB:                    job.GPUMemGB,
+		Interconnect:                job.RequestedInterconnect(),
+		CPUCores:                    job.RequestedCPUCores(),
+		CPUReserveCores:             job.RequestedCPUReserveCores(),
+		RAMReservationKB:            jobRAMReservationKB(job),
+		WallTimeSeconds:             int(job.WallTime() / time.Second),
+		GPUIdleTimeoutSeconds:       job.GPUIdleTimeoutOverride(),
+		StdoutSilenceTimeoutSeconds: job.StdoutSilenceTimeoutOverride(),
+		Tags:                        job.Tags,
+		OutputDirs:                  job.OutputDirs,
+		Outputs:                     job.Outputs,
+		Produces:                    job.Produces,
+		Needs:                       job.Needs,
+		ArtifactNeeds:               artifactNeeds,
+		Payloads:                    payloads,
+		SetupPolicy:                 job.SetupPolicy,
 	}
 	addCmd := opsqueue.NewAddCommand(entry)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
@@ -138,9 +140,13 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 
 func queueProtocolCompatibilityError(host string, state *opsqueue.RunnerState) error {
 	if state == nil {
+		// Reaching here with a nil state (and no fetch error) means the
+		// runner has never published state — it may not be started, or it
+		// is running without publishing. `weft queue update` cannot fix
+		// either (wb164).
 		return fmt.Errorf(
-			"queue runner protocol version on %s is unknown (required=%d); run `weft queue update %s`",
-			host, opsqueue.QueueProtocolVersion, host)
+			"queue runner on %s has not published state (required protocol=%d); start it with `weft queue start %s` — if it is already running, its state publication is failing (see `weft queue status %s`)",
+			host, opsqueue.QueueProtocolVersion, host, host)
 	}
 	if state.QueueProtocolVersion < opsqueue.QueueProtocolVersion {
 		return fmt.Errorf(
@@ -150,10 +156,20 @@ func queueProtocolCompatibilityError(host string, state *opsqueue.RunnerState) e
 	return nil
 }
 
+// recordHostAgentRuntimeObservation caches the identity read from the
+// runner's state file. observedAt is when the caller read the state, never
+// the state's own updated_at: that timestamp records the runner's last queue
+// activity, so an idle runner's state can be hours old while its identity is
+// freshly re-observed on every sync.
 func recordHostAgentRuntimeObservation(database *sql.DB, host string, state *opsqueue.RunnerState, observedAt time.Time) {
 	if database == nil || state == nil {
 		return
 	}
+	// state.UpdatedAt is the runner's liveness heartbeat (saved at least
+	// every few seconds), so prefer it: an SSH-transport state read carries
+	// the runner's own stamp, and both writers of running_observed_at (this
+	// recorder and the hostsync worker reading the same state file) then
+	// agree on what the column means.
 	if state.UpdatedAt > 0 {
 		observedAt = time.Unix(state.UpdatedAt, 0)
 	}

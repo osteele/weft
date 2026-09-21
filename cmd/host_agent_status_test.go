@@ -14,21 +14,25 @@ import (
 )
 
 func TestBuildHostAgentStatusRowsClassifiesFreshnessAndSkew(t *testing.T) {
-	now := time.Unix(1_000, 0)
+	// The stale-observation bound (hostAgentRuntimeFreshness) tracks the
+	// daemon's quiet-period sync cadence, so a host is only stale once its
+	// observation is genuinely old — an hour here, versus seconds for the
+	// current hosts.
+	now := time.Unix(10_000, 0)
 	desired := "desired123456"
 	hosts := []inventory.HostSpec{{Name: "current"}, {Name: "old"}, {Name: "stale-cache"}, {Name: "unseen"}}
 	observations := []db.HostAgentState{
 		{
-			Host: "current", DeployedVersion: desired, DeployedObservedAt: 800,
-			RunningVersion: desired, QueueProtocolVersion: opsqueue.QueueProtocolVersion, RunningObservedAt: 990,
+			Host: "current", DeployedVersion: desired, DeployedObservedAt: 9800,
+			RunningVersion: desired, QueueProtocolVersion: opsqueue.QueueProtocolVersion, RunningObservedAt: 9990,
 		},
 		{
-			Host: "old", DeployedVersion: desired, DeployedObservedAt: 800,
-			RunningVersion: "old123456789", QueueProtocolVersion: opsqueue.QueueProtocolVersion, RunningObservedAt: 990,
+			Host: "old", DeployedVersion: desired, DeployedObservedAt: 9800,
+			RunningVersion: "old123456789", QueueProtocolVersion: opsqueue.QueueProtocolVersion, RunningObservedAt: 9990,
 		},
 		{
-			Host: "stale-cache", DeployedVersion: desired, DeployedObservedAt: 800,
-			RunningVersion: "old123456789", QueueProtocolVersion: 0, RunningObservedAt: 700,
+			Host: "stale-cache", DeployedVersion: desired, DeployedObservedAt: 9800,
+			RunningVersion: "old123456789", QueueProtocolVersion: 0, RunningObservedAt: 6400,
 		},
 	}
 

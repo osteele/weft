@@ -767,45 +767,57 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 
 	runnerSession := opsqueue.TmuxSessionName()
 
-	// Check if runner is active
-	exists, err := ssh.TmuxSessionExists(host, runnerSession)
-	if err != nil {
-		return fmt.Errorf("check session: %w", err)
-	}
-
 	fmt.Printf("Queue on %s:\n\n", host)
 
-	if exists {
+	// The tmux probe is a live SSH fact, but a probe failure is unknown,
+	// never STOPPED (wb164).
+	exists, err := ssh.TmuxSessionExists(host, runnerSession)
+	switch {
+	case err != nil:
+		fmt.Printf("Runner: unknown (probe failed: %v)\n", err)
+	case exists:
 		fmt.Println("Runner: ACTIVE")
-	} else {
+	default:
 		fmt.Println("Runner: STOPPED")
 	}
 
 	// The R2 state envelope is the only surface that records which agent
 	// build the runner process is executing. Hosts on the SSH transport
-	// never publish it, so no agent-version line exists for them.
+	// never publish it, so no agent-version line exists for them. Dispatch
+	// gates on the envelope's freshness, so staleness is stated beside the
+	// values it qualifies rather than left as a parenthetical (wb164).
 	if ops.HostUsesR2Queue(host) {
-		for _, line := range queueAgentVersionLines(host, readRunningAgentVersion(host), readDeployedAgentVersion(host)) {
+		view, viewErr := ops.FetchR2StateView(host)
+		for _, line := range queueAgentVersionLines(host, runningAgentVersionFromView(view, viewErr), readDeployedAgentVersion(host)) {
 			fmt.Println(line)
 		}
+		if note := publishedStateFreshnessNote(view, viewErr); note != "" {
+			fmt.Println(note)
+		}
 	}
-
-	// Get currently running job
+	// Get currently running job and queue depth. These reads ride the same
+	// SSH transport as the tmux probe: a transport failure is unknown, never
+	// an empty answer (wb164).
 	currentFile := opsqueue.CurrentFilePath()
-	currentID, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
+	currentID, _, currentErr := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
 	currentID = strings.TrimSpace(currentID)
 
-	if currentID != "" {
+	if currentErr != nil {
+		fmt.Printf("Current job: unknown (read failed: %v)\n", currentErr)
+	} else if currentID != "" {
 		fmt.Printf("Current job: %s\n", currentID)
 	} else {
 		fmt.Println("Current job: (none)")
 	}
 
-	// Get queue depth
 	stateFile := opsqueue.StateFilePath()
-	countOutput, _, _ := ssh.Run(host, fmt.Sprintf("jq -r '.pending | length // 0' %s 2>/dev/null || echo 0", stateFile))
+	countOutput, _, countErr := ssh.Run(host, fmt.Sprintf("jq -r '.pending | length // 0' %s 2>/dev/null || echo 0", stateFile))
 	countOutput = strings.TrimSpace(countOutput)
-	fmt.Printf("Jobs waiting: %s\n", countOutput)
+	if countErr != nil {
+		fmt.Println("Jobs waiting: unknown (read failed)")
+	} else {
+		fmt.Printf("Jobs waiting: %s\n", countOutput)
+	}
 
 	// Check for stop signal
 	stopFile := opsqueue.StopFilePath()
@@ -815,6 +827,27 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// publishedStateFreshnessNote states, beside the values it qualifies, when
+// the published state envelope cannot back dispatch decisions. The
+// dispatcher gates on this envelope's freshness, so a stale or unreadable
+// envelope is a dispatch-relevant fact, not a display nicety.
+func publishedStateFreshnessNote(view *ops.R2StateView, err error) string {
+	switch {
+	case err != nil:
+		return fmt.Sprintf("Published state: unreadable (%v); dispatch refuses jobs until the runner publishes again", err)
+	case view.Absent:
+		return "Published state: none yet; dispatch refuses jobs until the runner publishes (see `weft queue start`)"
+	case view.Stale:
+		note := "Published state: stale"
+		if view.Age > 0 {
+			note = fmt.Sprintf("Published state: last published %s ago (stale)", db.FormatDuration(int64(view.Age/time.Second)))
+		}
+		return note + "; agent fields above come from that snapshot, and dispatch refuses jobs until the runner publishes fresh state"
+	default:
+		return ""
+	}
 }
 
 // versionReading is one agent-version observation. The three states are
@@ -850,12 +883,11 @@ func (r versionReading) describe() string {
 	}
 }
 
-// readRunningAgentVersion reads the version the runner last published with
-// its state envelope. Staleness qualifies the reading but does not void it:
-// the version names the process that published, and the age says how much
-// to trust that the process is still alive.
-func readRunningAgentVersion(host string) versionReading {
-	view, err := ops.FetchR2StateView(host)
+// runningAgentVersionFromView reads the version the runner last published
+// with its state envelope. Staleness qualifies the reading but does not void
+// it: the version names the process that published, and the age says how
+// much to trust that the process is still alive.
+func runningAgentVersionFromView(view *ops.R2StateView, err error) versionReading {
 	if err != nil {
 		return versionReading{err: err}
 	}

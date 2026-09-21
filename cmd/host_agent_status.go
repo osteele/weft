@@ -16,7 +16,13 @@ import (
 
 const (
 	hostAgentStatusSchemaVersion = 2
-	hostAgentRuntimeFreshness    = 2 * time.Minute
+	// Observations are recorded by the daemon's host-sync passes. During
+	// quiet periods those passes run on daemonQuietSyncInterval (5m), so a
+	// healthy observation can legitimately lag several minutes; a bound
+	// tighter than the recording cadence renders normal hosts stale around
+	// the clock (wb162). Twice the quiet interval absorbs one skipped pass
+	// on both the publish and sync sides.
+	hostAgentRuntimeFreshness = 10 * time.Minute
 )
 
 var hostAgentStatusJSON bool

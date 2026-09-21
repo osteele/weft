@@ -449,12 +449,13 @@ func connectionRetry(op func() error, getOutput func() string, label string, ver
 
 // TmuxSessionExists checks if a tmux session exists on the remote host (with retry)
 func TmuxSessionExists(host, sessionName string) (bool, error) {
-	stdout, stderr, err := RunWithRetryQuiet(host, TmuxCommand(fmt.Sprintf("has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName)))
+	stdout, _, err := RunWithRetryQuiet(host, TmuxCommand(fmt.Sprintf("has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName)))
 	if err != nil {
-		// Check if it's a connection error
-		if IsConnectionError(stdout + stderr) {
-			return false, err
-		}
+		// The remote command always exits 0 (the || echo NO arm), so a
+		// non-nil error is an SSH transport failure, never a session
+		// answer. Report it: swallowing it renders a probe failure as
+		// "no session" (wb164).
+		return false, err
 	}
 	// Check last line for YES/NO
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
