@@ -33,9 +33,12 @@ import (
 var SourceUploadStallTimeout = 5 * time.Minute
 
 const (
-	// sourceUploadBudgetBase covers connection setup and request overhead that
-	// does not scale with payload size.
-	sourceUploadBudgetBase = 2 * time.Minute
+	// sourceUploadBudgetBase covers connection setup and request overhead
+	// that does not scale with payload size. It must exceed
+	// SourceUploadStallTimeout (5m): a wedged small upload should be
+	// diagnosed as stalled by the watchdog, not expire here as a generic
+	// budget overrun.
+	sourceUploadBudgetBase = 6 * time.Minute
 
 	// sourceUploadFloorBytesPerSec is the slowest sustained uplink the total
 	// backstop will wait out. It is deliberately well below observed

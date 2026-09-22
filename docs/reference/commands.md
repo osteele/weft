@@ -231,7 +231,8 @@ cloud placement (equivalent to tagging the job with `--tag interruptible`). The
 key `preemptible` and tag `preemptible` are accepted as synonyms.
 Scripts with long CPU-bound phases can also declare hang-watchdog overrides in
 `[tool.weft]`: `gpu-idle-timeout` and `stdout-silence-timeout` take Go
-durations (for example `"45m"`); `"off"` or `0` disables that watchdog. The
+durations (for example `"45m"`); `"off"` or `"0"` (quoted strings) disables
+that watchdog. The
 matching flags are `--gpu-idle-timeout` and `--stdout-silence-timeout`.
 
 **OOM history:** When a job fails with a GPU out-of-memory error, weft records

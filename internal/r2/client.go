@@ -736,15 +736,23 @@ func (c *Client) putObjectMultipart(ctx context.Context, key string, body io.Rea
 	}
 
 	partSize := c.multipartPartSize()
+	// Windows are computed from the body's current position: a caller may
+	// pass a seekable body positioned mid-stream, and part offsets are
+	// relative to that position (wb158 review round 2).
+	var start int64
+	if s, ok := body.(io.Seeker); ok {
+		start, _ = s.Seek(0, io.SeekCurrent)
+	}
 	var parts []types.CompletedPart
 	partNumber := int32(1)
-	for offset := int64(0); offset < size; offset, partNumber = offset+partSize, partNumber+1 {
+	for windowOffset := int64(0); windowOffset < size; windowOffset, partNumber = windowOffset+partSize, partNumber+1 {
 		length := partSize
-		if remaining := size - offset; remaining < length {
+		if remaining := size - windowOffset; remaining < length {
 			length = remaining
 		}
+		base := start + windowOffset
 		makePart := func() (io.Reader, int64, error) {
-			return &sectionReadSeeker{r: seeker, s: seeker, base: offset, limit: length, underPos: -1}, length, nil
+			return &sectionReadSeeker{r: seeker, s: seeker, base: base, limit: length, underPos: -1}, length, nil
 		}
 		etag, err := c.uploadPartWithRetry(ctx, key, uploadID, partNumber, makePart)
 		if err != nil {
