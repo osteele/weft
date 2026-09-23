@@ -286,8 +286,34 @@ func TestDeriveCheckpointNameBasename(t *testing.T) {
 	}
 }
 
+// chdirIntoPublishFixtureRepo builds a VCS-marked repository under a temp
+// directory holding testdata/pytorch-training/train.py, changes into its
+// cmd/ subdirectory, and returns the source path relative to that directory.
+// The tests use their own repository rather than the checkout they run from,
+// because a source snapshot need not carry .jj or .git (wb169).
+func chdirIntoPublishFixtureRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("create repo: %v", err)
+	}
+	src := filepath.Join(repo, "testdata", "pytorch-training", "train.py")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatalf("create testdata directory: %v", err)
+	}
+	if err := os.WriteFile(src, []byte("print('train')\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	workDir := filepath.Join(repo, "cmd")
+	if err := os.Mkdir(workDir, 0o755); err != nil {
+		t.Fatalf("create working directory: %v", err)
+	}
+	t.Chdir(workDir)
+	return filepath.Join("..", "testdata", "pytorch-training", "train.py")
+}
+
 func TestDerivePublishTargetPathFromRelativeRepoPath(t *testing.T) {
-	got := derivePublishTargetPath(filepath.Join("..", "testdata", "pytorch-training", "train.py"))
+	got := derivePublishTargetPath(chdirIntoPublishFixtureRepo(t))
 	want := "testdata/pytorch-training/train.py"
 	if got != want {
 		t.Fatalf("target path = %q, want %q", got, want)
@@ -323,7 +349,7 @@ func TestRunDataPublishDefaultsToRelativeRepoPath(t *testing.T) {
 	setupDataPublishTest(t, r2Client)
 	dataPublishName = "training-script"
 
-	if err := runDataPublish(nil, []string{filepath.Join("..", "testdata", "pytorch-training", "train.py")}); err != nil {
+	if err := runDataPublish(nil, []string{chdirIntoPublishFixtureRepo(t)}); err != nil {
 		t.Fatalf("runDataPublish: %v", err)
 	}
 

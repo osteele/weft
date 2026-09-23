@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -428,9 +429,21 @@ func TestEnsureSystemSitePackagesVenv_RebuildsWhenHomeMismatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read rebuilt pyvenv.cfg: %v", err)
 	}
-	expectedHome := "home = " + filepath.Dir(pythonPath)
-	if !strings.Contains(string(got), expectedHome) {
-		t.Fatalf("rebuilt venv home does not match %q, got:\n%s", expectedHome, got)
+	// `python -m venv` records the interpreter's resolved directory, which
+	// differs from filepath.Dir(pythonPath) when python3 on PATH is a symlink
+	// or a version-manager shim (wb169). Accept either, as the contract does.
+	acceptedHomes := []string{filepath.Dir(pythonPath)}
+	if _, probedHome, err := systemPythonProbe(); err == nil && probedHome != "" {
+		acceptedHomes = append(acceptedHomes, probedHome)
+	}
+	var rebuiltHome string
+	for _, line := range strings.Split(string(got), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok && strings.TrimSpace(key) == "home" {
+			rebuiltHome = strings.TrimSpace(value)
+		}
+	}
+	if !slices.Contains(acceptedHomes, rebuiltHome) {
+		t.Fatalf("rebuilt venv home = %q, want one of %q; pyvenv.cfg:\n%s", rebuiltHome, acceptedHomes, got)
 	}
 }
 
