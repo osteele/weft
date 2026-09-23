@@ -103,21 +103,40 @@ func ResolveTorchMaxComputeCapForPersistence(archMax, dir string) string {
 // ResolveJobTorchMaxComputeCapForPersistence resolves the persisted cap
 // encoding (see ResolveTorchMaxComputeCapForPersistence) for a job command.
 // Precedence: an explicit script [tool.weft] gpu-arch-max; then the torch
-// release the PEP 723 script's own requirement determines (an exact pin or an
-// upper bound), because `uv run <script>` imports torch from the script
-// environment rather than the project lock (wb166); then the project torch
-// pin, which also covers scripts with an open torch range.
+// releases determined by the PEP 723 environments the command actually runs
+// (see scriptEnvTorchMaxComputeCap); then the project torch pin, which also
+// covers `uv run python script.py` and scripts with an open torch range.
 func ResolveJobTorchMaxComputeCapForPersistence(dir, command string) string {
 	archMax := ""
 	if meta, err := ScanScriptMeta(dir, command); err == nil && meta != nil {
 		archMax = meta.GPUArchMax
 	}
 	if strings.TrimSpace(archMax) == "" {
-		if pin := ScanScriptTorchPin(dir, command); pin != nil {
-			return TorchMaxComputeCap(pin.Version, pin.CudaVariant)
+		if cap := scriptEnvTorchMaxComputeCap(dir, command); cap != "" {
+			return cap
 		}
 	}
 	return ResolveTorchMaxComputeCapForPersistence(archMax, dir)
+}
+
+// scriptEnvTorchMaxComputeCap returns the most restrictive cap across the
+// PEP 723 script environments a command runs via direct `uv run script.py`
+// steps, each of which imports torch from its own environment rather than the
+// project lock (wb166). Environments whose requirement does not determine a
+// release contribute no bound. Returns "" when no environment yields a cap.
+func scriptEnvTorchMaxComputeCap(dir, command string) string {
+	best, bestVal := "", 0.0
+	for _, script := range UVRunPEP723Scripts(dir, command) {
+		env := scriptTorchEnv(dir, command, script)
+		if env == nil || env.Pin == nil {
+			continue
+		}
+		cap := TorchMaxComputeCap(env.Pin.Version, env.Pin.CudaVariant)
+		if v, ok := parseComputeCap(cap); ok && (best == "" || v < bestVal) {
+			best, bestVal = cap, v
+		}
+	}
+	return best
 }
 
 func TorchMinComputeCapForDir(dir string) string {

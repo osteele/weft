@@ -51,6 +51,28 @@ func TestScriptTorchUpperBoundDeterminesCapAndFloor(t *testing.T) {
 	}
 }
 
+// Each `uv run script.py` step resolves its own environment, so a later
+// torch 2.9.1 (cu128) step must keep its 12.8 operational floor even though an
+// earlier step's bounded range resolves an older wheel.
+func TestScriptTorchFloorsMergeAcrossCompoundCommandSteps(t *testing.T) {
+	dir, _ := writeScriptTorchProject(t, "torch>=2.2,<2.7")
+	writeScript(t, filepath.Join(dir, "scripts", "second.py"), "# /// script\n# dependencies = [\"torch==2.9.1\"]\n# ///\nimport torch\n")
+	command := "uv run scripts/exp.py && uv run scripts/second.py"
+
+	for _, mode := range []RuntimeFloorMode{RuntimeFloorExact, RuntimeFloorFamily} {
+		runtime, err := ResolveEffectiveRuntime(dir, command, EffectiveRuntimeOptions{FloorMode: mode})
+		if err != nil {
+			t.Fatalf("ResolveEffectiveRuntime mode %d: %v", mode, err)
+		}
+		if runtime.Floor.Req.MinCUDAVersion != "12.8" {
+			t.Errorf("mode %d MinCUDAVersion = %q, want 12.8 from the torch 2.9.1+cu128 step", mode, runtime.Floor.Req.MinCUDAVersion)
+		}
+		if want := imagereq.MinDriverForCUDA("12.8"); runtime.Floor.Req.MinDriverVersion != want {
+			t.Errorf("mode %d MinDriverVersion = %d, want %d", mode, runtime.Floor.Req.MinDriverVersion, want)
+		}
+	}
+}
+
 func TestScriptTorchOpenRangeKeepsLatestTorchFloor(t *testing.T) {
 	dir, command := writeScriptTorchProject(t, "torch>=2.2")
 

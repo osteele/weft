@@ -16,6 +16,24 @@ func DirectUVRunPEP723Script(dir, command string) string {
 	return script
 }
 
+// shellStepSeparators splits a command at shell list and pipeline operators;
+// "||" precedes "|" so the replacer matches the longer operator.
+var shellStepSeparators = strings.NewReplacer("&&", "\n", "||", "\n", "|", "\n", ";", "\n")
+
+// UVRunPEP723Scripts returns the scripts a command runs in their own PEP 723
+// script environments: every shell step that is a direct `uv run ... script.py`
+// of a script carrying PEP 723 metadata, in command order. Steps such as
+// `uv run python script.py` run in the project environment and are excluded.
+func UVRunPEP723Scripts(dir, command string) []string {
+	var out []string
+	for _, step := range strings.Split(shellStepSeparators.Replace(command), "\n") {
+		if script := directUVRunScript(step); script != "" && ScriptHasPEP723Metadata(dir, command, script) {
+			out = append(out, script)
+		}
+	}
+	return out
+}
+
 func directUVRunScript(command string) string {
 	// Compound commands may contain another step that needs the project
 	// environment. Decline inference rather than skipping its setup.

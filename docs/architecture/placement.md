@@ -17,13 +17,18 @@ metadata (`gpu`, `gpu-mem`, `gpu-arch-max`, `cuda-driver-min`, `min-driver`,
 `tags`).
 
 **Inferred from the torch pin** (`dataloc.ScanTorchPin` reads `uv.lock`,
-falling back to `pyproject.toml`). When the job's PEP 723 script declares its
-own torch requirement, `uv run` imports torch from the script environment, so
-the script's requirement takes the pin's place for the arch cap and the
-CUDA/driver floor (`dataloc.ScanScriptTorchPin`): an exact pin, or the highest
-release line an upper bound admits (`torch>=2.2,<2.7` -> 2.6). A script range
-with no upper bound takes the newest-torch CUDA floor
-(`dataloc.OpenEndedTorchCUDAFloor`) and leaves the cap to the project pin.
+falling back to `pyproject.toml`). A PEP 723 script that declares its own
+torch requirement resolves torch in its own environment
+(`dataloc.ScanScriptTorchEnvs`), pinned by an exact requirement or by the
+highest release line an upper bound admits after wildcard exclusions
+(`torch>=2.2,<2.8,!=2.7.*` -> 2.6). Each such environment contributes to the
+CUDA/driver floor, max-merged across the scripts a command references; a
+range with no determinable release line takes the newest-torch CUDA floor
+(`dataloc.OpenEndedTorchCUDAFloor`). The arch cap follows script environments
+only for steps that actually run one — a direct `uv run script.py`
+(`dataloc.UVRunPEP723Scripts`) — taking the most restrictive cap across them;
+`uv run python script.py`, open script ranges, and commands without such a
+step take the cap from the project pin.
 
 - *Arch cap* (`max_compute_cap`): the highest CUDA compute capability the
   pinned wheel ships kernels for (`placement.TorchMaxComputeCap`). Persisted

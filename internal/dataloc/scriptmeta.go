@@ -298,40 +298,74 @@ func ScanScriptTorchRequirement(dir, command string) *TorchRequirement {
 	return nil
 }
 
-// ScanScriptTorchPin returns the torch release and CUDA wheel variant a PEP 723
-// script environment resolves to, as far as the script's own requirement
-// determines it: the pinned version for `torch==X`, or the highest release line
-// an upper bound admits (`torch>=2.2,<2.7` -> 2.6), since uv resolves the newest
-// admitted release. It returns nil for an open range, whose resolved release is
-// whatever torch is newest.
-func ScanScriptTorchPin(dir, command string) *TorchPin {
-	for _, tree := range scanScriptPEP723Trees(dir, command) {
-		req := scriptTorchRequirementFromTree(tree)
-		if req == nil {
-			continue
-		}
-		version := req.Ceiling
-		if req.Exact {
-			version = req.Version
-		}
-		if version == "" {
-			continue
-		}
-		cuda := ""
-		if uvTree := tree.Get("tool.uv"); uvTree != nil {
-			if ut, ok := uvTree.(*toml.Tree); ok {
-				cuda = cudaVariantFromUvTree(ut)
-			}
-		}
-		if cuda == "" {
-			maj, min, ok := parseTorchMajMin(version)
-			if ok {
-				cuda = defaultTorchCudaVariant(maj, min)
-			}
-		}
-		return &TorchPin{Version: version, CudaVariant: cuda}
+// ScriptTorchEnv is the torch a single PEP 723 script environment installs, as
+// far as the script's own requirement determines it.
+type ScriptTorchEnv struct {
+	Script string
+	Req    *TorchRequirement
+	// Pin is the release and CUDA wheel variant the requirement resolves to:
+	// the pinned version for `torch==X`, or the highest release line an upper
+	// bound admits (`torch>=2.2,<2.7` -> 2.6), since uv resolves the newest
+	// admitted release. Nil when the requirement does not determine a release
+	// line (an open range), so the newest torch may resolve.
+	Pin *TorchPin
+}
+
+// CUDAVersion returns the provider CUDA floor the environment's torch wheel
+// needs: the pinned wheel's CUDA variant, OpenEndedTorchCUDAFloor when the
+// release is not determined, or "" when the variant is unknown.
+func (e ScriptTorchEnv) CUDAVersion() string {
+	if e.Pin != nil {
+		return CUDAVariantVersion(e.Pin.CudaVariant)
 	}
-	return nil
+	if e.Req != nil && !e.Req.Exact {
+		return OpenEndedTorchCUDAFloor
+	}
+	return ""
+}
+
+// ScanScriptTorchEnvs returns one entry per referenced PEP 723 script that
+// declares a torch requirement, in command order.
+func ScanScriptTorchEnvs(dir, command string) []ScriptTorchEnv {
+	var out []ScriptTorchEnv
+	for _, script := range ExtractPythonScriptsInDir(dir, command) {
+		if env := scriptTorchEnv(dir, command, script); env != nil {
+			out = append(out, *env)
+		}
+	}
+	return out
+}
+
+func scriptTorchEnv(dir, command, script string) *ScriptTorchEnv {
+	tree := scriptPEP723Tree(dir, command, script)
+	if tree == nil {
+		return nil
+	}
+	req := scriptTorchRequirementFromTree(tree)
+	if req == nil {
+		return nil
+	}
+	env := &ScriptTorchEnv{Script: script, Req: req}
+	version := req.Ceiling
+	if req.Exact && !strings.Contains(req.Spec, "*") {
+		version = req.Version
+	}
+	if version == "" {
+		return env
+	}
+	cuda := ""
+	if uvTree := tree.Get("tool.uv"); uvTree != nil {
+		if ut, ok := uvTree.(*toml.Tree); ok {
+			cuda = cudaVariantFromUvTree(ut)
+		}
+	}
+	if cuda == "" {
+		if maj, min, ok := parseTorchMajMin(version); ok {
+			cuda = defaultTorchCudaVariant(maj, min)
+		}
+	}
+	env.Pin = &TorchPin{Version: version, CudaVariant: cuda}
+	return env
 }
 
 func ScriptUsesTorch(dir, command string) bool {
@@ -353,22 +387,27 @@ func DepsUseTorch(deps []DepSpec) bool {
 func scanScriptPEP723Trees(dir, command string) []*toml.Tree {
 	var out []*toml.Tree
 	for _, script := range ExtractPythonScriptsInDir(dir, command) {
-		abs := resolveScriptPath(dir, command, script)
-		content, err := os.ReadFile(abs)
-		if err != nil {
-			continue
+		if tree := scriptPEP723Tree(dir, command, script); tree != nil {
+			out = append(out, tree)
 		}
-		block := extractPEP723Block(string(content))
-		if block == "" {
-			continue
-		}
-		tree, err := toml.Load(block)
-		if err != nil {
-			continue
-		}
-		out = append(out, tree)
 	}
 	return out
+}
+
+func scriptPEP723Tree(dir, command, script string) *toml.Tree {
+	content, err := os.ReadFile(resolveScriptPath(dir, command, script))
+	if err != nil {
+		return nil
+	}
+	block := extractPEP723Block(string(content))
+	if block == "" {
+		return nil
+	}
+	tree, err := toml.Load(block)
+	if err != nil {
+		return nil
+	}
+	return tree
 }
 
 func scriptTorchRequirementFromTree(tree *toml.Tree) *TorchRequirement {

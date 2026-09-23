@@ -231,7 +231,11 @@ func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
 	return runtime.Floor, err
 }
 
-func mergeScriptTorchRuntimeFloor(rf *RuntimeFloor, req *dataloc.TorchRequirement, pin *dataloc.TorchPin) {
+// mergeScriptTorchRuntimeFloor merges one script environment's torch wheel
+// into a family-mode floor: the CUDA family floor plus operational raises for
+// a determined release, or the newest-torch floor for an open range.
+func mergeScriptTorchRuntimeFloor(rf *RuntimeFloor, env dataloc.ScriptTorchEnv) {
+	req, pin := env.Req, env.Pin
 	if req == nil {
 		return
 	}

@@ -152,23 +152,19 @@ func ResolveEffectiveRuntime(localDir, command string, opts EffectiveRuntimeOpti
 
 func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode, meta *dataloc.ScriptMeta) RuntimeFloor {
 	var rf RuntimeFloor
-	scriptReq := dataloc.ScanScriptTorchRequirement(dir, command)
+	scriptEnvs := dataloc.ScanScriptTorchEnvs(dir, command)
 	scriptDeps := dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))
-	scriptOwnsCUDA := scriptOwnsCUDAEnv(meta, scriptReq, scriptDeps)
+	scriptOwnsCUDA := scriptOwnsCUDAEnv(meta, len(scriptEnvs) > 0, scriptDeps)
 
-	if scriptReq != nil {
-		if mode == RuntimeFloorExact {
-			if scriptCUDA := dataloc.ScriptTorchCUDAVersion(dir, command); scriptCUDA != "" {
-				origin := "script PEP 723 torch open range"
-				if scriptReq.Exact {
-					origin = "script PEP 723 torch dependency"
-				} else if scriptReq.Ceiling != "" {
-					origin = fmt.Sprintf("script PEP 723 torch %s (resolves %s)", strings.TrimSpace(scriptReq.Spec), scriptReq.Ceiling)
-				}
-				rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: scriptCUDA}, origin)
+	if len(scriptEnvs) > 0 {
+		// Each script resolves its own environment, so every environment's
+		// torch floor is max-merged rather than taking the first script's.
+		for _, env := range scriptEnvs {
+			if mode == RuntimeFloorExact {
+				mergeScriptTorchExactFloor(&rf, env)
+			} else {
+				mergeScriptTorchRuntimeFloor(&rf, env)
 			}
-		} else {
-			mergeScriptTorchRuntimeFloor(&rf, scriptReq, dataloc.ScanScriptTorchPin(dir, command))
 		}
 	} else if !scriptOwnsCUDA {
 		// The project torch pin only governs the runtime image when the
@@ -214,14 +210,31 @@ func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode, meta *datal
 // torch/CUDA for this job is the PEP 723 script environment rather than the
 // project uv environment. It is true when the script is isolated (project uv
 // sync is skipped) or when the script carries its own torch/CUDA dependencies.
-func scriptOwnsCUDAEnv(meta *dataloc.ScriptMeta, scriptReq *dataloc.TorchRequirement, scriptDeps []dataloc.DepSpec) bool {
+func scriptOwnsCUDAEnv(meta *dataloc.ScriptMeta, scriptDeclaresTorch bool, scriptDeps []dataloc.DepSpec) bool {
 	if meta != nil && meta.Isolated {
 		return true
 	}
-	if scriptReq != nil {
+	if scriptDeclaresTorch {
 		return true
 	}
 	return dataloc.DepsUseTorch(scriptDeps) || dataloc.LibraryMinCUDAFromDeps(scriptDeps) != ""
+}
+
+// mergeScriptTorchExactFloor merges one script environment's torch wheel CUDA
+// toolkit version into an exact-mode floor.
+func mergeScriptTorchExactFloor(rf *RuntimeFloor, env dataloc.ScriptTorchEnv) {
+	cuda := env.CUDAVersion()
+	if cuda == "" {
+		return
+	}
+	origin := "script PEP 723 torch open range"
+	switch {
+	case env.Req.Exact:
+		origin = "script PEP 723 torch dependency"
+	case env.Pin != nil:
+		origin = fmt.Sprintf("script PEP 723 torch %s (resolves %s)", strings.TrimSpace(env.Req.Spec), env.Pin.Version)
+	}
+	rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, origin)
 }
 
 func mergeProjectTorchRuntimeFloor(rf *RuntimeFloor, pin *dataloc.TorchPin) {

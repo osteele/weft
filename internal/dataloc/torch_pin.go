@@ -197,24 +197,6 @@ func ScanPyprojectTorchRequirement(dir string) *TorchRequirement {
 	return scanPyprojectTorchRequirement(filepath.Join(root, "pyproject.toml"))
 }
 
-// ScriptTorchCUDAVersion returns the provider CUDA floor implied by the PEP 723
-// script's own torch requirement: the CUDA variant of the release it resolves
-// to (see ScanScriptTorchPin), or OpenEndedTorchCUDAFloor for an open range.
-// It returns "" when the script declares no torch or the variant is unknown.
-func ScriptTorchCUDAVersion(dir, command string) string {
-	req := ScanScriptTorchRequirement(dir, command)
-	if req == nil {
-		return ""
-	}
-	if pin := ScanScriptTorchPin(dir, command); pin != nil {
-		return CUDAVariantVersion(pin.CudaVariant)
-	}
-	if !req.Exact {
-		return OpenEndedTorchCUDAFloor
-	}
-	return ""
-}
-
 func scanFileForTorch(f *os.File) bool {
 	const maxLines = 500
 	scanner := bufio.NewScanner(f)
@@ -560,56 +542,89 @@ func parseTorchRequirementString(req string) *TorchRequirement {
 	}
 }
 
+// releaseLineKey is a torch major.minor release line.
+type releaseLineKey struct{ maj, min int }
+
+func (l releaseLineKey) less(o releaseLineKey) bool {
+	return l.maj < o.maj || (l.maj == o.maj && l.min < o.min)
+}
+
 // torchSpecCeiling returns the highest major.minor release line a PEP 440
-// specifier set admits, or "" when no clause bounds the release line.
-// Clauses are AND-combined, so the lowest bounded clause wins.
+// specifier set admits. It returns "" when no clause bounds the release line
+// from above, and when no line between the set's lower and upper bounds
+// survives its wildcard exclusions (`!=2.7.*`), so an excluded or unsatisfiable
+// line is never reported. Clauses are AND-combined.
 func torchSpecCeiling(spec string) string {
-	var bestMaj, bestMin int
+	var ceiling, floor releaseLineKey
 	bounded := false
+	excludedLines := map[releaseLineKey]bool{}
+	excludedMajors := map[int]bool{}
+	raiseFloor := func(maj, min int, ok bool) {
+		if l := (releaseLineKey{maj, min}); ok && floor.less(l) {
+			floor = l
+		}
+	}
+	lowerCeiling := func(maj, min int, ok bool) {
+		if l := (releaseLineKey{maj, min}); ok && (!bounded || l.less(ceiling)) {
+			ceiling, bounded = l, true
+		}
+	}
 	for _, part := range strings.Split(spec, ",") {
-		maj, min, ok := specClauseCeiling(strings.TrimSpace(part))
-		if !ok {
+		m := specOpRe.FindStringSubmatch(strings.TrimSpace(part))
+		if m == nil {
 			continue
 		}
-		if !bounded || maj < bestMaj || (maj == bestMaj && min < bestMin) {
-			bestMaj, bestMin, bounded = maj, min, true
+		op, ver := m[1], stripLocal(m[2])
+		wildcard := strings.HasSuffix(ver, ".*")
+		ver = strings.TrimSuffix(ver, ".*")
+		switch op {
+		case "==", "===":
+			raiseFloor(releaseLine(ver))
+			// "==2.*" admits every 2.x line, leaving the ceiling open.
+			if !wildcard || strings.Contains(ver, ".") {
+				lowerCeiling(releaseLine(ver))
+			}
+		case ">=", ">":
+			raiseFloor(releaseLine(ver))
+		case "<=":
+			lowerCeiling(releaseLine(ver))
+		case "<":
+			lowerCeiling(lineBelow(ver))
+		case "~=":
+			raiseFloor(releaseLine(ver))
+			if upper := compatibleReleaseUpperBound(ver); upper != "" {
+				lowerCeiling(lineBelow(upper))
+			}
+		case "!=":
+			// Only a wildcard exclusion removes whole release lines; "!=2.7.0"
+			// leaves the rest of the 2.7 line admitted.
+			if !wildcard {
+				continue
+			}
+			switch parts := releaseParts(ver); len(parts) {
+			case 1:
+				excludedMajors[parts[0]] = true
+			case 2:
+				excludedLines[releaseLineKey{parts[0], parts[1]}] = true
+			}
 		}
 	}
 	if !bounded {
 		return ""
 	}
-	return strconv.Itoa(bestMaj) + "." + strconv.Itoa(bestMin)
-}
-
-// specClauseCeiling returns the highest major.minor line one specifier clause
-// admits. ok is false for clauses without an upper bound (>=, >, !=) and for
-// bounds that leave the minor line open within a major ("<3", "~=2.6",
-// "==2.*").
-func specClauseCeiling(clause string) (maj, min int, ok bool) {
-	m := specOpRe.FindStringSubmatch(clause)
-	if m == nil {
-		return 0, 0, false
-	}
-	op, ver := m[1], stripLocal(m[2])
-	switch op {
-	case "==", "===":
-		if strings.HasSuffix(ver, ".*") {
-			ver = strings.TrimSuffix(ver, ".*")
-			if !strings.Contains(ver, ".") {
-				return 0, 0, false
-			}
+	for line := ceiling; !line.less(floor); line.min-- {
+		if excludedMajors[line.maj] {
+			// The highest admitted minor of an earlier major is unknown.
+			return ""
 		}
-		return releaseLine(ver)
-	case "<=":
-		return releaseLine(ver)
-	case "<":
-		return lineBelow(ver)
-	case "~=":
-		if upper := compatibleReleaseUpperBound(ver); upper != "" {
-			return lineBelow(upper)
+		if !excludedLines[line] {
+			return strconv.Itoa(line.maj) + "." + strconv.Itoa(line.min)
+		}
+		if line.min == 0 {
+			return ""
 		}
 	}
-	return 0, 0, false
+	return ""
 }
 
 // releaseLine returns the major.minor line containing version v ("2.6.3" ->
