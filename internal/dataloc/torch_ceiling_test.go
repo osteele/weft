@@ -50,9 +50,11 @@ func TestParseTorchRequirementCeiling(t *testing.T) {
 // A direct `uv run script.py` imports torch from the script's own PEP 723
 // environment, so the script's torch bound — not the project lock — decides
 // which wheel imports and therefore the cap (wb166). `uv run python script.py`
-// imports the project environment's torch instead.
+// and other project-environment steps import the project lock's torch, so a
+// command mixing both kinds of step must satisfy both.
 func TestResolveJobTorchMaxComputeCapForPersistence_ScriptTorchBound(t *testing.T) {
 	const bounded = `# dependencies = ["torch>=2.2,<2.7"]`
+	const torch291 = `# dependencies = ["torch==2.9.1"]`
 	cases := []struct {
 		name         string
 		projectTorch string
@@ -72,6 +74,31 @@ func TestResolveJobTorchMaxComputeCapForPersistence_ScriptTorchBound(t *testing.
 			map[string]string{"first.py": `# dependencies = ["torch==2.9.1"]`, "second.py": bounded},
 			"uv run scripts/first.py && uv run scripts/second.py", "9.0",
 		},
+		{
+			"project-env step keeps the project cap in the minimum", "2.6.0",
+			map[string]string{"first.py": `# dependencies = ["torch==2.6.0"]`, "second.py": torch291},
+			"uv run python scripts/first.py && uv run scripts/second.py", "9.0",
+		},
+		{
+			"bare python step runs in the project env", "2.6.0",
+			map[string]string{"prep.py": "", "second.py": torch291},
+			"python scripts/prep.py && uv run scripts/second.py", "9.0",
+		},
+		{
+			"uv run tool step runs in the project env", "2.6.0",
+			map[string]string{"second.py": torch291},
+			"uv run pytest -q && uv run scripts/second.py", "9.0",
+		},
+		{
+			"cd keeps the script-only override", "2.6.0",
+			map[string]string{"second.py": torch291},
+			"cd scripts && uv run second.py", "12.0",
+		},
+		{
+			"non-Python steps are neutral", "2.6.0",
+			map[string]string{"second.py": torch291},
+			"echo start && mkdir -p out && FOO=1 uv run scripts/second.py | tee out/log", "12.0",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -84,7 +111,10 @@ func TestResolveJobTorchMaxComputeCapForPersistence_ScriptTorchBound(t *testing.
 				t.Fatal(err)
 			}
 			for name, metadata := range c.scripts {
-				script := "# /// script\n" + metadata + "\n# ///\nimport torch\n"
+				script := "import torch\n"
+				if metadata != "" {
+					script = "# /// script\n" + metadata + "\n# ///\n" + script
+				}
 				if err := os.WriteFile(filepath.Join(dir, "scripts", name), []byte(script), 0o644); err != nil {
 					t.Fatal(err)
 				}

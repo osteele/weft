@@ -103,40 +103,53 @@ func ResolveTorchMaxComputeCapForPersistence(archMax, dir string) string {
 // ResolveJobTorchMaxComputeCapForPersistence resolves the persisted cap
 // encoding (see ResolveTorchMaxComputeCapForPersistence) for a job command.
 // Precedence: an explicit script [tool.weft] gpu-arch-max; then the torch
-// releases determined by the PEP 723 environments the command actually runs
-// (see scriptEnvTorchMaxComputeCap); then the project torch pin, which also
-// covers `uv run python script.py` and scripts with an open torch range.
+// releases determined by the PEP 723 environments the command's direct
+// `uv run script.py` steps run in, each of which imports torch from its own
+// environment rather than the project lock (wb166); then the project torch
+// pin, which also covers `uv run python script.py` and scripts with an open
+// torch range. When a command mixes both kinds of step, the cap is the most
+// restrictive across every environment that imports torch.
 func ResolveJobTorchMaxComputeCapForPersistence(dir, command string) string {
 	archMax := ""
 	if meta, err := ScanScriptMeta(dir, command); err == nil && meta != nil {
 		archMax = meta.GPUArchMax
 	}
-	if strings.TrimSpace(archMax) == "" {
-		if cap := scriptEnvTorchMaxComputeCap(dir, command); cap != "" {
-			return cap
+	if strings.TrimSpace(archMax) != "" {
+		return ResolveTorchMaxComputeCapForPersistence(archMax, dir)
+	}
+	envs := ScanCommandPythonEnvs(dir, command)
+	scriptCap := scriptEnvTorchMaxComputeCap(dir, command, envs.Scripts)
+	if scriptCap == "" || envs.ProjectEnv {
+		projectCap := ResolveTorchMaxComputeCapForPersistence("", dir)
+		if scriptCap == "" || lowerComputeCap(projectCap, scriptCap) {
+			return projectCap
 		}
 	}
-	return ResolveTorchMaxComputeCapForPersistence(archMax, dir)
+	return scriptCap
 }
 
 // scriptEnvTorchMaxComputeCap returns the most restrictive cap across the
-// PEP 723 script environments a command runs via direct `uv run script.py`
-// steps, each of which imports torch from its own environment rather than the
-// project lock (wb166). Environments whose requirement does not determine a
-// release contribute no bound. Returns "" when no environment yields a cap.
-func scriptEnvTorchMaxComputeCap(dir, command string) string {
-	best, bestVal := "", 0.0
-	for _, script := range UVRunPEP723Scripts(dir, command) {
+// given PEP 723 script environments. Environments whose requirement does not
+// determine a release contribute no bound. Returns "" when none yields a cap.
+func scriptEnvTorchMaxComputeCap(dir, command string, scripts []string) string {
+	best := ""
+	for _, script := range scripts {
 		env := scriptTorchEnv(dir, command, script)
 		if env == nil || env.Pin == nil {
 			continue
 		}
-		cap := TorchMaxComputeCap(env.Pin.Version, env.Pin.CudaVariant)
-		if v, ok := parseComputeCap(cap); ok && (best == "" || v < bestVal) {
-			best, bestVal = cap, v
+		if cap := TorchMaxComputeCap(env.Pin.Version, env.Pin.CudaVariant); best == "" || lowerComputeCap(cap, best) {
+			best = cap
 		}
 	}
 	return best
+}
+
+// lowerComputeCap reports whether a is a numeric cap below numeric cap b.
+func lowerComputeCap(a, b string) bool {
+	av, aok := parseComputeCap(a)
+	bv, bok := parseComputeCap(b)
+	return aok && bok && av < bv
 }
 
 func TorchMinComputeCapForDir(dir string) string {

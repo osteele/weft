@@ -16,19 +16,69 @@ func DirectUVRunPEP723Script(dir, command string) string {
 	return script
 }
 
-// shellStepSeparators splits a command at shell list and pipeline operators;
-// "||" precedes "|" so the replacer matches the longer operator.
-var shellStepSeparators = strings.NewReplacer("&&", "\n", "||", "\n", "|", "\n", ";", "\n")
+// shellStepSeparators splits a command at shell list and pipeline operators,
+// after joining backslash line continuations; "||" precedes "|" so the
+// replacer matches the longer operator.
+var shellStepSeparators = strings.NewReplacer("\\\n", " ", "&&", "\n", "||", "\n", "|", "\n", ";", "\n")
 
-// UVRunPEP723Scripts returns the scripts a command runs in their own PEP 723
-// script environments: every shell step that is a direct `uv run ... script.py`
-// of a script carrying PEP 723 metadata, in command order. Steps such as
-// `uv run python script.py` run in the project environment and are excluded.
-func UVRunPEP723Scripts(dir, command string) []string {
-	var out []string
+// CommandPythonEnvs classifies the Python environments a shell command's
+// steps run in.
+type CommandPythonEnvs struct {
+	// Scripts are the PEP 723 scripts run in their own script environments
+	// by direct `uv run ... script.py` steps, in command order.
+	Scripts []string
+	// ProjectEnv reports that some step may run Python in the project
+	// environment: `uv run python ...`, `uv run` of a tool or of a script
+	// without PEP 723 metadata, bare `python ...`, or any executable that is
+	// not a known non-Python command.
+	ProjectEnv bool
+}
+
+// neutralCommands are shell builtins and utilities that never import the
+// project's Python packages, so a step running one says nothing about which
+// environment the job's torch comes from.
+var neutralCommands = map[string]bool{
+	"cd": true, "pushd": true, "popd": true, "pwd": true, "export": true,
+	"unset": true, "set": true, "source": true, ".": true, "true": true,
+	"false": true, "test": true, "[": true, "echo": true, "printf": true,
+	"mkdir": true, "rm": true, "cp": true, "mv": true, "ln": true,
+	"touch": true, "ls": true, "cat": true, "tee": true, "sleep": true,
+	"date": true, "nvidia-smi": true, "uvx": true,
+}
+
+// commandWrappers run the rest of the step as the command.
+var commandWrappers = map[string]bool{"env": true, "time": true, "nohup": true, "exec": true}
+
+// ScanCommandPythonEnvs splits command into shell steps and classifies each.
+// Unrecognized executables count as project-environment Python: treating a
+// step as project Python can only add the project torch's constraints, never
+// drop a script environment's.
+func ScanCommandPythonEnvs(dir, command string) CommandPythonEnvs {
+	var out CommandPythonEnvs
 	for _, step := range strings.Split(shellStepSeparators.Replace(command), "\n") {
-		if script := directUVRunScript(step); script != "" && ScriptHasPEP723Metadata(dir, command, script) {
-			out = append(out, script)
+		tokens := strings.Fields(step)
+		i := 0
+		for i < len(tokens) && (isShellAssignment(tokens[i]) || commandWrappers[trimStepToken(tokens[i])]) {
+			i++
+		}
+		if i >= len(tokens) {
+			continue
+		}
+		name := filepath.Base(trimStepToken(tokens[i]))
+		switch {
+		case name == "uv":
+			if i+1 >= len(tokens) || trimShellToken(tokens[i+1]) != "run" {
+				continue // uv sync, uv pip, ...: no user Python runs.
+			}
+			target := trimStepToken(uvRunTarget(tokens[i+2:]))
+			if strings.HasSuffix(target, ".py") && ScriptHasPEP723Metadata(dir, command, target) {
+				out.Scripts = append(out.Scripts, target)
+			} else {
+				out.ProjectEnv = true
+			}
+		case neutralCommands[name]:
+		default:
+			out.ProjectEnv = true
 		}
 	}
 	return out
@@ -51,8 +101,17 @@ func directUVRunScript(command string) string {
 	if i+1 >= len(tokens) || filepath.Base(trimShellToken(tokens[i])) != "uv" || trimShellToken(tokens[i+1]) != "run" {
 		return ""
 	}
-	i += 2
+	script := uvRunTarget(tokens[i+2:])
+	if !strings.HasSuffix(script, ".py") {
+		return ""
+	}
+	return script
+}
 
+// uvRunTarget returns the command or script that `uv run` executes, given the
+// tokens after `uv run`: the first token after uv's own options.
+func uvRunTarget(tokens []string) string {
+	i := 0
 	for i < len(tokens) {
 		token := trimShellToken(tokens[i])
 		if token == "--" {
@@ -71,11 +130,12 @@ func directUVRunScript(command string) string {
 	if i >= len(tokens) {
 		return ""
 	}
-	script := trimShellToken(tokens[i])
-	if !strings.HasSuffix(script, ".py") {
-		return ""
-	}
-	return script
+	return trimShellToken(tokens[i])
+}
+
+// trimStepToken strips quotes and subshell parentheses from a step token.
+func trimStepToken(token string) string {
+	return strings.Trim(token, `"'()`)
 }
 
 func trimShellToken(token string) string {

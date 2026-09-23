@@ -73,6 +73,25 @@ func TestScriptTorchFloorsMergeAcrossCompoundCommandSteps(t *testing.T) {
 	}
 }
 
+// A `uv run python` step imports the project lock's torch 2.12.1+cu128 even
+// though another step runs a PEP 723 environment resolving an older wheel, so
+// the project wheel's 12.8 floor must survive the max-merge.
+func TestScriptTorchFloorsIncludeProjectEnvSteps(t *testing.T) {
+	dir, _ := writeScriptTorchProject(t, "torch>=2.2,<2.7")
+	writeScript(t, filepath.Join(dir, "scripts", "prep.py"), "import torch\n")
+	command := "uv run python scripts/prep.py && uv run scripts/exp.py"
+
+	for _, mode := range []RuntimeFloorMode{RuntimeFloorExact, RuntimeFloorFamily} {
+		runtime, err := ResolveEffectiveRuntime(dir, command, EffectiveRuntimeOptions{FloorMode: mode})
+		if err != nil {
+			t.Fatalf("ResolveEffectiveRuntime mode %d: %v", mode, err)
+		}
+		if runtime.Floor.Req.MinCUDAVersion != "12.8" {
+			t.Errorf("mode %d MinCUDAVersion = %q, want 12.8 from the project torch 2.12.1+cu128 step", mode, runtime.Floor.Req.MinCUDAVersion)
+		}
+	}
+}
+
 func TestScriptTorchOpenRangeKeepsLatestTorchFloor(t *testing.T) {
 	dir, command := writeScriptTorchProject(t, "torch>=2.2")
 

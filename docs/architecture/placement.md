@@ -24,11 +24,16 @@ highest release line an upper bound admits after wildcard exclusions
 (`torch>=2.2,<2.8,!=2.7.*` -> 2.6). Each such environment contributes to the
 CUDA/driver floor, max-merged across the scripts a command references; a
 range with no determinable release line takes the newest-torch CUDA floor
-(`dataloc.OpenEndedTorchCUDAFloor`). The arch cap follows script environments
-only for steps that actually run one — a direct `uv run script.py`
-(`dataloc.UVRunPEP723Scripts`) — taking the most restrictive cap across them;
-`uv run python script.py`, open script ranges, and commands without such a
-step take the cap from the project pin.
+(`dataloc.OpenEndedTorchCUDAFloor`). `dataloc.ScanCommandPythonEnvs` classifies
+each shell step: a direct `uv run script.py` of a PEP 723 script runs that
+script's environment; `uv run python ...`, `uv run <tool>`, bare `python ...`,
+and any executable not known to be non-Python run in the project environment;
+builtins and utilities such as `cd`, `echo`, `mkdir` and `export` are neutral.
+The arch cap is the most restrictive across the script environments of direct
+steps, plus the project pin's cap when any step runs in the project
+environment. When a script environment owns CUDA, a project-environment step
+also max-merges the project wheel's CUDA floor. Commands with no direct script
+step, and open script ranges, take the cap from the project pin.
 
 - *Arch cap* (`max_compute_cap`): the highest CUDA compute capability the
   pinned wheel ships kernels for (`placement.TorchMaxComputeCap`). Persisted

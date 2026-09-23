@@ -156,34 +156,34 @@ func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode, meta *datal
 	scriptDeps := dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))
 	scriptOwnsCUDA := scriptOwnsCUDAEnv(meta, len(scriptEnvs) > 0, scriptDeps)
 
-	if len(scriptEnvs) > 0 {
-		// Each script resolves its own environment, so every environment's
-		// torch floor is max-merged rather than taking the first script's.
-		for _, env := range scriptEnvs {
-			if mode == RuntimeFloorExact {
-				mergeScriptTorchExactFloor(&rf, env)
-			} else {
-				mergeScriptTorchRuntimeFloor(&rf, env)
-			}
+	// Each script resolves its own environment, so every environment's torch
+	// floor is max-merged rather than taking the first script's.
+	for _, env := range scriptEnvs {
+		if mode == RuntimeFloorExact {
+			mergeScriptTorchExactFloor(&rf, env)
+		} else {
+			mergeScriptTorchRuntimeFloor(&rf, env)
 		}
-	} else if !scriptOwnsCUDA {
+	}
+	if !scriptOwnsCUDA {
 		// The project torch pin only governs the runtime image when the
 		// project env is the one that will import torch. A PEP 723 script
 		// with its own torch/CUDA deps runs in an isolated environment and
-		// ignores the project lockfile, so the lockfile is not even read.
+		// ignores the project lockfile.
 		if pin := dataloc.ScanTorchPin(dir); pin != nil {
 			// Recorded in both floor modes: whether a hard wheel-bound pin
 			// exists is a property of the project, not of how the floor is
 			// being resolved.
 			rf.ProjectTorchPinCUDA = dataloc.CUDAVariantVersion(pin.CudaVariant)
-			if mode == RuntimeFloorExact {
-				if cuda := rf.ProjectTorchPinCUDA; cuda != "" {
-					rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, "torch pin")
-				}
-			} else {
-				mergeProjectTorchRuntimeFloor(&rf, pin)
-			}
+			mergeProjectTorchFloor(&rf, mode, pin)
 		}
+	} else if dataloc.ScanCommandPythonEnvs(dir, command).ProjectEnv {
+		// A script environment owns CUDA, but another step also runs Python
+		// in the project environment and imports the project lock's torch, so
+		// that wheel's floor joins the max-merge. It is not recorded as the
+		// image-binding ProjectTorchPinCUDA: the project env does not own
+		// torch for the whole job.
+		mergeProjectTorchFloor(&rf, mode, dataloc.ScanTorchPin(dir))
 	}
 
 	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
@@ -235,6 +235,21 @@ func mergeScriptTorchExactFloor(rf *RuntimeFloor, env dataloc.ScriptTorchEnv) {
 		origin = fmt.Sprintf("script PEP 723 torch %s (resolves %s)", strings.TrimSpace(env.Req.Spec), env.Pin.Version)
 	}
 	rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, origin)
+}
+
+// mergeProjectTorchFloor merges the project torch wheel's CUDA floor: its exact
+// toolkit version in exact mode, its family and operational floors otherwise.
+func mergeProjectTorchFloor(rf *RuntimeFloor, mode RuntimeFloorMode, pin *dataloc.TorchPin) {
+	if pin == nil {
+		return
+	}
+	if mode != RuntimeFloorExact {
+		mergeProjectTorchRuntimeFloor(rf, pin)
+		return
+	}
+	if cuda := dataloc.CUDAVariantVersion(pin.CudaVariant); cuda != "" {
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, "torch pin")
+	}
 }
 
 func mergeProjectTorchRuntimeFloor(rf *RuntimeFloor, pin *dataloc.TorchPin) {
