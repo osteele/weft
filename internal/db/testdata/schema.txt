@@ -151,6 +151,22 @@ table deferred_operations
   col 4 queue_name TEXT notnull=0 default=<none> pk=0
   col 5 payload TEXT notnull=0 default=<none> pk=0
   col 6 created_at INTEGER notnull=1 default=<none> pk=0
+table diagnosis_shadow
+  col 0 job_id INTEGER notnull=0 default=<none> pk=1
+  col 1 attempt_id INTEGER notnull=0 default=<none> pk=0
+  col 2 judged_at INTEGER notnull=1 default=<none> pk=0
+  col 3 model TEXT notnull=0 default=<none> pk=0
+  col 4 display_pattern TEXT notnull=0 default=<none> pk=0
+  col 5 remediation_pattern TEXT notnull=0 default=<none> pk=0
+  col 6 fatal_pattern TEXT notnull=0 default=<none> pk=0
+  col 7 jev_category TEXT notnull=0 default=<none> pk=0
+  col 8 jev_confidence REAL notnull=0 default=<none> pk=0
+  col 9 jev_probabilities TEXT notnull=0 default=<none> pk=0
+  col 10 regex_supported REAL notnull=0 default=<none> pk=0
+  col 11 fatal_supported REAL notnull=0 default=<none> pk=0
+  col 12 latency_ms INTEGER notnull=0 default=<none> pk=0
+  col 13 input_tokens INTEGER notnull=0 default=<none> pk=0
+  fk job_id -> jobs(id) on_update=NO ACTION on_delete=CASCADE
 table donor_experiments
   col 0 campaign_id INTEGER notnull=0 default=<none> pk=1
   col 1 cohort TEXT notnull=1 default=<none> pk=0

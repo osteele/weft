@@ -59,6 +59,9 @@ const (
 	OpRemediationDiagnosis = "remediation.diagnosis"
 	OpRemediationApplied   = "remediation.applied"
 
+	// Measurement-only second-opinion failure classification (TypeSafe Jev).
+	OpDiagnosisShadow = "diagnosis.shadow"
+
 	// Agent R2/cloud operations
 	OpR2Get    = "r2.get"
 	OpR2Put    = "r2.put"

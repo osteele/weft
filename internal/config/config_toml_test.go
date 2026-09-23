@@ -67,6 +67,52 @@ func TestLoadPrefersTOMLConfig(t *testing.T) {
 	}
 }
 
+func TestDiagnosisShadowSettings(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+	body := "[diagnosis_shadow]\nenabled = true\nlookback = \"3d\"\ninterval = \"90s\"\nmax_per_pass = 7\n"
+	if err := os.WriteFile(tomlPath, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	origPath, origLegacy, origUnknown := configPath, legacyConfigPath, UnknownTOMLKeys
+	configPath, legacyConfigPath = tomlPath, ""
+	defer func() { configPath, legacyConfigPath, UnknownTOMLKeys = origPath, origLegacy, origUnknown }()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(UnknownTOMLKeys) != 0 {
+		t.Fatalf("unknown keys %v: [diagnosis_shadow] did not decode", UnknownTOMLKeys)
+	}
+	if !cfg.DiagnosisShadow.Enabled {
+		t.Fatal("enabled = false, want true")
+	}
+	got, err := cfg.DiagnosisShadow.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DiagnosisShadowSettings{Model: DefaultDiagnosisShadowModel, Interval: 90 * time.Second, Lookback: 72 * time.Hour, MaxPerPass: 7}
+	if got != want {
+		t.Fatalf("Settings = %+v, want %+v", got, want)
+	}
+
+	defaults, err := DiagnosisShadowConfig{}.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults != (DiagnosisShadowSettings{Model: "jev-1.13.0", Interval: 5 * time.Minute, Lookback: 14 * 24 * time.Hour, MaxPerPass: 20}) {
+		t.Fatalf("default Settings = %+v", defaults)
+	}
+
+	// A typo must not silently become the default.
+	for _, bad := range []DiagnosisShadowConfig{{Interval: "5 minutes"}, {Lookback: "-1d"}, {MaxPerPass: -1}} {
+		if _, err := bad.Settings(); err == nil {
+			t.Errorf("Settings(%+v) = nil error, want rejection", bad)
+		}
+	}
+}
+
 func TestLoadFallsBackToLegacyYAMLConfig(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "config.toml")

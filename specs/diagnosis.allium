@@ -221,8 +221,8 @@ rule TimeoutDiagnosisRequiresConsistentExitStatus {
         -- diagnosis is dropped.
 
     -- legacy annotation: @guidance
-        -- Implementation: dropUnsupportedTimeout in
-        -- cmd/diagnosis_format.go, applied to both the stored diagnosis
+        -- Implementation: DropUnsupportedTimeout in
+        -- internal/remediation/display.go, applied to both the stored diagnosis
         -- and the log-cache fallback. A deliberate non-zero exit — a
         -- pre-registered gate reporting its verdict, say — is a result;
         -- calling it a timeout invites a pointless re-run on a longer cap

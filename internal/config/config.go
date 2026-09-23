@@ -143,9 +143,87 @@ type Config struct {
 	// Bug selects the backing issue tracker for `weft bug`.
 	Bug BugConfig `yaml:"bug" toml:"bug"`
 
+	// DiagnosisShadow configures the measurement-only TypeSafe Jev second
+	// opinion on failed-job diagnoses. Nothing acts on its answers.
+	DiagnosisShadow DiagnosisShadowConfig `yaml:"diagnosis_shadow" toml:"diagnosis_shadow"`
+
 	// AutomapDirs lists local prefixes that should reuse the same relative path
 	// on remote hosts; defaults to ["~"].
 	AutomapDirs []string `yaml:"automap_dirs" toml:"automap_dirs"`
+}
+
+// Defaults for [diagnosis_shadow].
+const (
+	// DefaultDiagnosisShadowModel is pinned to a release, not an alias such
+	// as jev-latest, so recorded judgments stay comparable across a pilot.
+	DefaultDiagnosisShadowModel      = "jev-1.13.0"
+	DefaultDiagnosisShadowInterval   = 5 * time.Minute
+	DefaultDiagnosisShadowLookback   = 14 * 24 * time.Hour
+	DefaultDiagnosisShadowMaxPerPass = 20
+)
+
+// DiagnosisShadowConfig configures the daemon worker that asks TypeSafe's Jev
+// model to classify each recently failed job and records the answer next to
+// weft's regex diagnoses. It is a measurement pilot: nothing acts on the
+// answers. When enabled, each judged job's command (first 600 characters),
+// exit code, and the last 4000 characters of its cached log are sent to
+// TypeSafe.
+type DiagnosisShadowConfig struct {
+	// Enabled turns the worker on. Default false.
+	Enabled bool `yaml:"enabled" toml:"enabled"`
+	// Model is the TypeSafe model id. Default DefaultDiagnosisShadowModel.
+	Model string `yaml:"model" toml:"model"`
+	// Interval is the time between passes (Go duration or Nd). Default 5m.
+	Interval string `yaml:"interval" toml:"interval"`
+	// Lookback bounds how long ago a job may have ended to be judged
+	// (Go duration or Nd). Default 14d.
+	Lookback string `yaml:"lookback" toml:"lookback"`
+	// MaxPerPass caps TypeSafe calls per pass. Default 20.
+	MaxPerPass int `yaml:"max_per_pass" toml:"max_per_pass"`
+}
+
+// DiagnosisShadowSettings is DiagnosisShadowConfig with defaults applied and
+// durations parsed.
+type DiagnosisShadowSettings struct {
+	Model      string
+	Interval   time.Duration
+	Lookback   time.Duration
+	MaxPerPass int
+}
+
+// Settings applies defaults to unset fields and rejects invalid ones rather
+// than silently substituting a default for a typo.
+func (c DiagnosisShadowConfig) Settings() (DiagnosisShadowSettings, error) {
+	s := DiagnosisShadowSettings{
+		Model:      strings.TrimSpace(c.Model),
+		Interval:   DefaultDiagnosisShadowInterval,
+		Lookback:   DefaultDiagnosisShadowLookback,
+		MaxPerPass: DefaultDiagnosisShadowMaxPerPass,
+	}
+	if s.Model == "" {
+		s.Model = DefaultDiagnosisShadowModel
+	}
+	if raw := strings.TrimSpace(c.Interval); raw != "" {
+		d, err := parseDurationWithDays(raw)
+		if err != nil || d <= 0 {
+			return s, fmt.Errorf("diagnosis_shadow.interval %q: want a positive duration such as 5m", c.Interval)
+		}
+		s.Interval = d
+	}
+	if raw := strings.TrimSpace(c.Lookback); raw != "" {
+		d, err := parseDurationWithDays(raw)
+		if err != nil || d <= 0 {
+			return s, fmt.Errorf("diagnosis_shadow.lookback %q: want a positive duration such as 14d", c.Lookback)
+		}
+		s.Lookback = d
+	}
+	if c.MaxPerPass < 0 {
+		return s, fmt.Errorf("diagnosis_shadow.max_per_pass %d: want a positive count", c.MaxPerPass)
+	}
+	if c.MaxPerPass > 0 {
+		s.MaxPerPass = c.MaxPerPass
+	}
+	return s, nil
 }
 
 // CLILocation resolves the CLI display timezone before command execution.

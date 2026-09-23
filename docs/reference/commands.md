@@ -959,6 +959,52 @@ users, status output may show a concise `Weft bug #123` or `Weft bug wb123`
 message instead of raw implementation details. Use `issues show <id>` for the
 maintainer record.
 
+### weft diagnose shadow
+
+List the diagnosis shadow's recorded judgments. The diagnosis shadow is a
+measurement pilot: a daemon worker asks TypeSafe's Jev model to classify each
+recently failed job and records its answer next to weft's regex diagnoses, so
+the two can be compared over real traffic. Nothing acts on Jev's answers — no
+kill, retry, cordon, diagnosis rewrite, or display change.
+
+```bash
+weft diagnose shadow                  # judgments from the last 7 days
+weft diagnose shadow --since 30d --json
+```
+
+Each row shows the job, weft's display, remediation, and runtime-fatal regex
+patterns, Jev's category and confidence, and `REGEX_OK` / `FATAL_OK`: Jev's
+probability that the log shows the job failed for the reason the display (else
+remediation) diagnosis or the fatal diagnosis gives. `-` means there was no
+such pattern, so the question was not asked.
+
+The worker is off by default. Enable it in `~/.config/weft/config.toml`:
+
+```toml
+[diagnosis_shadow]
+enabled = false         # default; true starts the worker in `weft daemon run`
+model = "jev-1.13.0"    # default; a pinned release, not an alias
+interval = "5m"         # time between passes
+lookback = "14d"        # judge jobs that ended within this window
+max_per_pass = 20       # TypeSafe calls per pass
+```
+
+The worker needs a TypeSafe API key from `TYPESAFE_API_KEY` in the daemon's
+environment or a `TYPESAFE_API_KEY=` line in `~/.config/weft/config` (the
+launchd daemon does not inherit your shell's environment). Without a key, or
+with an invalid setting, the daemon logs one warning at start and the worker
+stays off.
+
+**Data sent to TypeSafe:** for each judged job, its command (first 600
+characters), its exit code, and the last 4000 characters of its cached log.
+
+A failed job is judged once, newest first, when it has a non-empty local log
+cache entry; a job without one is skipped and considered again on later
+passes. A failed TypeSafe call stores nothing and is logged as a warning; the
+job is retried on a later pass, and a rate-limit response ends the pass early.
+Each stored judgment also writes a `diagnosis.shadow` entry to the operations
+log.
+
 ### weft job inspect / diff
 
 Normalize job metadata for postmortem inspection, or compare two jobs.

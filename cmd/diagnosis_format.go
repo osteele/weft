@@ -11,47 +11,15 @@ import (
 // ResolveJobDiagnosis falls back to a live log-cache scan when the
 // stored diagnosis is empty so jobs that never invoked the remediation
 // pipeline (benchmark / processed / no-retry failures) still surface a
-// pattern. See specs/job-lifecycle.allium.
+// pattern. The resolution itself is remediation.ResolveDisplayDiagnosis,
+// shared with the diagnosis shadow worker. See specs/job-lifecycle.allium.
 func ResolveJobDiagnosis(job *db.Job) *remediation.ErrorDiagnosis {
 	if job == nil {
 		return nil
 	}
-	if job.ErrorDiagnosis != "" {
-		if d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis); err == nil && d != nil {
-			return dropUnsupportedTimeout(job, d)
-		}
-	}
-	if job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0 &&
-		strings.TrimSpace(job.FailureReason) == "" && strings.TrimSpace(job.ErrorMessage) == "" {
-		return nil
-	}
-	cached, err := logcache.Read(job.ID)
-	if err != nil || cached == "" {
-		return nil
-	}
-	return dropUnsupportedTimeout(job, remediation.DiagnoseFromLog(cached))
-}
-
-// timeoutExitCodes are the exit statuses a killed-on-deadline process
-// actually carries: SIGTERM and SIGKILL as reported by a shell, plus
-// coreutils timeout(1).
-var timeoutExitCodes = map[int]bool{124: true, 137: true, 143: true}
-
-// dropUnsupportedTimeout suppresses a timeout diagnosis for a job that
-// exited under its own control. The timeout rule matches a bare "timed out"
-// or "timeout" token anywhere in the log, which a nested traceback or a
-// harness line can supply on its own; the exit status is the independent
-// check. A deliberate non-zero exit — a pre-registered gate reporting its
-// verdict, say — is a result, and calling it a timeout invites a pointless
-// re-run on a longer cap (wb68).
-func dropUnsupportedTimeout(job *db.Job, d *remediation.ErrorDiagnosis) *remediation.ErrorDiagnosis {
-	if d == nil || d.Pattern != "timeout" {
-		return d
-	}
-	if job.ExitCode == nil || *job.ExitCode == 0 || timeoutExitCodes[*job.ExitCode] {
-		return d
-	}
-	return nil
+	return remediation.ResolveDisplayDiagnosis(job, func() (string, error) {
+		return logcache.Read(job.ID)
+	})
 }
 
 func formatDiagnosisSummary(d *remediation.ErrorDiagnosis) string {

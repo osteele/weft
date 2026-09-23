@@ -2477,8 +2477,9 @@ rule DetectFailureReason {
 -- diagnose` surfaced "GPU out of memory" and "peak mem 81910 MiB" on
 -- an 80 GB device; `job info` and `job status` surfaced "Reason:
 -- error" and nothing else, hiding the smoking gun.
--- Implementation: cmd/diagnosis_format.go ResolveJobDiagnosis does the
--- stored-then-log-cache resolution;
+-- Implementation: internal/remediation/display.go ResolveDisplayDiagnosis
+-- does the stored-then-log-cache resolution (cmd/diagnosis_format.go
+-- ResolveJobDiagnosis supplies the log cache);
 -- internal/remediation/diagnosis.go (*ErrorDiagnosis).GPUOOMDetailLines()
 -- returns the per-process / notes / hint fragments and is the shared
 -- source used by both formatDiagnosisSummary (one-line) and

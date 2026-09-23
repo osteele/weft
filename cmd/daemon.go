@@ -186,6 +186,9 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	if shouldRenewEdgeKeys(cfg) {
 		go runEdgeKeyRenewer(ctx, cfg)
 	}
+	if cfg.DiagnosisShadow.Enabled {
+		go runDiagnosisShadow(ctx, database, cfg)
+	}
 	wakeSnapshot, snapshotErr := readAutopilotWakeSnapshot(database)
 	if snapshotErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(snapshotErr.Error()))
