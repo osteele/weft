@@ -712,8 +712,8 @@ func TestProcessCommands_Add_SameRunDuplicateWithoutStatusKeepsFinishedEntry(t *
 	if !ok {
 		t.Fatal("drop left no Finished entry; submitter would see confirmed absence and re-dispatch forever")
 	}
-	if finished.ExitCode != 3 || finished.FinishedAt != endTime {
-		t.Fatalf("Finished = %+v, want exit=3 finished_at from the completion record", finished)
+	if finished.ExitCode != 3 || finished.FinishedAt != endTime || finished.RunID != runID {
+		t.Fatalf("Finished = %+v, want exact-run completion %d", finished, runID)
 	}
 
 	// The entry must be durable: a zero FinishedAt is pruned on the next

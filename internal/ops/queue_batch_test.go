@@ -519,7 +519,7 @@ func TestApplyBatchStatusesR2FallbackWhenMarkerMissingAfterGracePeriod(t *testin
 	exitCode := 0
 	finishedAt := int64(1700000000)
 	statuses := map[int64]queueBatchStatus{
-		jobID: {ExitCode: &exitCode, Mtime: finishedAt, FromR2: true},
+		jobID: {RunID: *job.LatestRunID, ExitCode: &exitCode, Mtime: finishedAt, FromR2: true},
 	}
 
 	// 1. When within the grace period (30s after finish), sync is skipped to wait for R2.

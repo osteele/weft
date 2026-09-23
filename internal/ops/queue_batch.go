@@ -2,6 +2,7 @@ package ops
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -68,14 +69,12 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 	}
 
 	updated, err := applyBatchStatuses(database, jobIDs, jobByID, statuses, timeout)
-	if err != nil {
-		return updated, err
-	}
+	// Independent completion records remain useful when another row fails.
 	if hostUsesR2Queue(host) {
 		updated += syncMissingR2Completions(database, jobs, statuses)
 		updated += syncInventoryPublicationReports(database, jobs)
 	}
-	return updated, nil
+	return updated, err
 }
 
 // syncMissingR2Completions closes jobs whose completion the runner's own state
@@ -123,6 +122,10 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 
 func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.Job, statuses map[int64]queueBatchStatus, timeout, unknownAfter time.Duration, now time.Time) (int, error) {
 	var updated int
+	var failures []error
+	recordError := func(jobID int64, err error) {
+		failures = append(failures, fmt.Errorf("sync job %d: %w", jobID, err))
+	}
 	for _, jobID := range jobIDs {
 		job := jobByID[jobID]
 		if job == nil {
@@ -131,7 +134,8 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 		status, ok := statuses[jobID]
 		if !ok {
 			if err := clearQueueOutcomeUnknown(database, job); err != nil {
-				return updated, err
+				recordError(jobID, err)
+				continue
 			}
 			continue
 		}
@@ -148,32 +152,37 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 		switch status.State {
 		case queueStateQueued:
 			if err := clearQueueOutcomeUnknown(database, job); err != nil {
-				return updated, err
+				recordError(jobID, err)
+				continue
 			}
 			recordQueueDispatchOK(database, job.ID)
 			if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
 				if err := removeFromQueueFile(job.Host, job.ID, timeout); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				finalStatus := db.StatusCanceled
 				if *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead {
 					finalStatus = db.StatusKilled
 				}
 				if err := db.ClearPendingAndUpdateStatus(database, job.ID, finalStatus); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 				continue
 			}
 			if job.Status == db.StatusRunning {
 				if err := db.MarkQueuedByID(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			}
 		case queueStateRunning:
 			if err := clearQueueOutcomeUnknown(database, job); err != nil {
-				return updated, err
+				recordError(jobID, err)
+				continue
 			}
 			recordQueueDispatchOK(database, job.ID)
 			if job.StartTime == 0 {
@@ -190,27 +199,32 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 			switch job.Status {
 			case db.StatusQueued:
 				if err := db.MarkQueuedJobRunning(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			case db.StatusStarting:
 				if err := db.MarkRunningByID(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			case db.StatusPaused:
 				if err := db.MarkRunningFromPaused(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 				if err := db.MarkRunningFromTerminal(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			case db.StatusUnresolved:
 				if err := db.MarkRunningFromUnresolved(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			}
@@ -219,7 +233,8 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 			}
 		case queueStatePaused:
 			if err := clearQueueOutcomeUnknown(database, job); err != nil {
-				return updated, err
+				recordError(jobID, err)
+				continue
 			}
 			recordQueueDispatchOK(database, job.ID)
 			if job.StartTime == 0 {
@@ -230,17 +245,20 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 			switch job.Status {
 			case db.StatusQueued, db.StatusStarting, db.StatusRunning:
 				if err := db.MarkPausedByID(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 				if err := db.MarkPausedFromTerminal(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			case db.StatusUnresolved:
 				if err := db.MarkPausedFromUnresolved(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			}
@@ -250,7 +268,8 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 		case queueStateUnresolvedCandidate:
 			becameUnresolved, err := observeQueueOutcomeUnresolved(database, job, now, unknownAfter)
 			if err != nil {
-				return updated, err
+				recordError(jobID, err)
+				continue
 			}
 			if becameUnresolved {
 				updated++
@@ -258,7 +277,8 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 		case queueStateDead:
 			if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning && job.Status == db.StatusQueued {
 				if err := startQueuedJobNow(database, job, timeout); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 				continue
@@ -268,7 +288,8 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 			}
 			if job.Status != db.StatusDead && job.Status != db.StatusFailed && job.Status != db.StatusKilled && job.Status != db.StatusCanceled {
 				if err := db.MarkDeadByID(database, job.ID); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				updated++
 			}
@@ -287,7 +308,8 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 				recordPreflightDispatchBlock(database, job.ID, detail)
 			}
 			if err := db.CloseAttempt(database, job.ID, db.StatusFailed, nil, status.Mtime); err != nil {
-				return updated, err
+				recordError(jobID, err)
+				continue
 			}
 			updated++
 		default:
@@ -302,25 +324,18 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 						if since <= 0 && job.CreatedAt > 0 {
 							since = job.CreatedAt
 						}
-						if since > 0 && now.Sub(time.Unix(since, 0)) >= r2CompletionMarkerGracePeriod {
-							slog.Warn("R2 runner reported completion but no R2 completion record found; recording completion from runner state", "component", "sync", "job_id", job.ID, "exit_code", *status.ExitCode, "finished_at", status.Mtime)
+						// An old agent's job-only finished entry cannot identify
+						// which attempt ended, even after the grace period.
+						if status.RunID != 0 && since > 0 && now.Sub(time.Unix(since, 0)) >= r2CompletionMarkerGracePeriod {
+							slog.Warn("R2 completion record unavailable; using exact-attempt runner completion", "component", "sync", "job_id", job.ID, "run_id", status.RunID, "exit_code", *status.ExitCode, "error", err)
 							recordQueueDispatchOK(database, job.ID)
 							endTime := status.Mtime
 							if endTime <= 0 {
 								endTime = now.Unix()
 							}
-							runID := int64(0)
-							if job.LatestRunID != nil {
-								runID = *job.LatestRunID
-							}
-							if runID > 0 {
-								if recErr := RecordJobAttemptCompletion(database, job.ID, runID, *status.ExitCode, job.StartTime, endTime); recErr != nil {
-									return updated, recErr
-								}
-							} else {
-								if recErr := RecordJobCompletion(database, job.ID, *status.ExitCode, endTime); recErr != nil {
-									return updated, recErr
-								}
+							if recErr := RecordJobAttemptCompletion(database, job.ID, status.RunID, *status.ExitCode, job.StartTime, endTime); recErr != nil {
+								recordError(jobID, recErr)
+								continue
 							}
 							updated++
 							continue
@@ -340,7 +355,8 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 				recordQueueDispatchOK(database, job.ID)
 				metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
 				if metaErr != nil {
-					return updated, metaErr
+					recordError(jobID, metaErr)
+					continue
 				}
 				// Second evidence source: a failed/empty metadata read here is
 				// silent, and this may be the only tick that ever records this
@@ -353,7 +369,8 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 					endTime = metaEndTime
 				}
 				if err := RecordJobCompletion(database, job.ID, *status.ExitCode, endTime); err != nil {
-					return updated, err
+					recordError(jobID, err)
+					continue
 				}
 				// Record failure reason if present, and surface as a dispatch
 				// block so explain.ForJob shows the reason in `diagnose`.
@@ -385,7 +402,7 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 		}
 	}
 
-	return updated, nil
+	return updated, errors.Join(failures...)
 }
 
 // recordPreflightDispatchBlock inserts a dedup-windowed
@@ -445,7 +462,7 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 			}
 			if _, ok := wanted[id]; ok {
 				exitCode := finished.ExitCode
-				results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: finished.FinishedAt, FromR2: true}
+				results[id] = queueBatchStatus{RunID: finished.RunID, ExitCode: &exitCode, Mtime: finished.FinishedAt, FromR2: true}
 			}
 		}
 		for idText, rejected := range state.Rejected {

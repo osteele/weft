@@ -95,6 +95,7 @@ type RunningJobState struct {
 
 // FinishedJobState records terminal state for deduplication.
 type FinishedJobState struct {
+	RunID      int64 `json:"run_id,omitempty"`
 	ExitCode   int   `json:"exit_code"`
 	FinishedAt int64 `json:"finished_at"`
 	ObservedAt int64 `json:"observed_at,omitempty"`
@@ -491,6 +492,7 @@ func (s *State) removeRunningLocked(jobID string) {
 
 func (s *State) recordFinishedLocked(jobID string, exitCode int, finishedAt int64) {
 	s.Finished[jobID] = FinishedJobState{
+		RunID:      s.Running[jobID].RunID,
 		ExitCode:   exitCode,
 		FinishedAt: finishedAt,
 	}

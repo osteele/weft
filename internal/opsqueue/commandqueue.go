@@ -316,6 +316,7 @@ func (s *RunnerState) Supports(capability string) bool {
 // completed (which, after the archive-on-add fix, is no longer a no-op and
 // would re-run them).
 type RunnerFinishedState struct {
+	RunID      int64 `json:"run_id,omitempty"`
 	ExitCode   int   `json:"exit_code"`
 	FinishedAt int64 `json:"finished_at"`
 }

@@ -35,6 +35,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Attempt-fenced completion sync**: Runner completion snapshots identify the
+  exact attempt. Legacy job-only completions cannot terminate a newer retry,
+  and a failed row update does not block synchronization of sibling jobs (wb178).
 - **Artifact dependency failure isolation**: Confirmed missing or failed
   producer artifacts fail the rental consumer with a dependency diagnosis.
   Pending publication and storage lookup errors defer admission. These

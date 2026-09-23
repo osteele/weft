@@ -282,6 +282,28 @@ rule QueueWorkerAbsenceBecomesUnresolved {
     -- supplies the outcome and may transition unresolved to completed/failed.
 }
 
+rule RunnerFinishedObservationIsAttemptFenced {
+    when: RunnerFinishedSnapshotReceived(job, observation)
+
+    if observation.run_id = null or observation.run_id = 0:
+        ensures: ObservationCannotCompleteCurrentAttempt(observation, job)
+    else:
+        requires: observation.run_id = job.latest_attempt.id
+        ensures: CompletionFallbackUsesObservedAttempt(observation)
+
+    -- An exact-attempt runner outcome can close execution after the result
+    -- marker grace period even when the marker lookup is unavailable.
+    -- Publication readiness remains a separate fact.
+}
+
+rule BatchStatusWriteFailureIsIsolated {
+    when: BatchStatusWriteFailed(host, job)
+
+    ensures: FailureReportedToCaller(job)
+    ensures: OtherJobObservationsStillApplied(host, job)
+    ensures: IndependentCompletionAndPublicationSyncStillAttempted(host)
+}
+
 -- Start-now can tentatively assign a tmux session while an R2-pull runner
 -- concurrently starts the queued attempt. A fresh runner entry for the exact
 -- attempt is positive ownership evidence even when its status-file and process

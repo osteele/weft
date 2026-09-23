@@ -151,6 +151,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 				if rec, dup := cp.sameAttemptTerminalRecord(state, cmd.Job); dup {
 					state.removePendingLocked(cmd.Job.ID)
 					state.Finished[jobIDStr] = FinishedJobState{
+						RunID:    rec.RunID,
 						ExitCode: rec.ExitCode, FinishedAt: rec.EndTime, ObservedAt: time.Now().Unix(),
 					}
 					if rec.ExitCode == 0 {
