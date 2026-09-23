@@ -25,14 +25,12 @@ func TestHumanizeFailureReason_StripsMultiline(t *testing.T) {
 
 func TestHumanizeFailureReason_KnownReasons(t *testing.T) {
 	tests := map[string]string{
-		"":                      "",
-		"gpu_oom":               "GPU out of memory",
-		"oom":                   "host out of memory",
-		"disk_full":             "disk full",
-		"timeout":               "timed out",
-		"killed_stdout_silence": "killed: no stdout output for the silence-watchdog timeout",
-		"killed_gpu_idle":       "killed: GPU idle for the GPU-watchdog timeout",
-		"cuda_driver_too_old":   "cuda driver too old",
+		"":                    "",
+		"gpu_oom":             "GPU out of memory",
+		"oom":                 "host out of memory",
+		"disk_full":           "disk full",
+		"timeout":             "timed out",
+		"cuda_driver_too_old": "cuda driver too old",
 		db.FailureReasonInfraTorchPreflightFailed:       "CUDA probe failed before user code started",
 		db.FailureReasonTorchPreflightEnvironmentFailed: "torch preflight could not start its Python environment",
 		db.FailureReasonTorchPreflightImportFailed:      "torch preflight could not import torch",
@@ -40,6 +38,32 @@ func TestHumanizeFailureReason_KnownReasons(t *testing.T) {
 	for input, want := range tests {
 		if got := humanizeFailureReason(input); got != want {
 			t.Errorf("humanizeFailureReason(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// A watchdog kill reason must say what the watchdog actually measured and
+// how to override it: a GPU-idle kill that omits the log-activity half reads
+// as "the GPU was idle", and operators then add progress prints the log
+// already has, or change GPU work when output was what stopped.
+func TestHumanizeFailureReason_WatchdogKillsNameSignalAndOverride(t *testing.T) {
+	cases := []struct {
+		reason, flag string
+		gpu          bool
+	}{
+		{"killed_gpu_idle", "--gpu-idle-timeout", true},
+		{"killed_stdout_silence", "--stdout-silence-timeout", false},
+	}
+	for _, c := range cases {
+		got := humanizeFailureReason(c.reason)
+		if !strings.Contains(got, "log growth") || !strings.Contains(got, "output-directory writes") {
+			t.Errorf("%s: %q does not name the log/output activity signal", c.reason, got)
+		}
+		if !strings.Contains(got, c.flag) {
+			t.Errorf("%s: %q does not name its override %s", c.reason, got, c.flag)
+		}
+		if strings.Contains(got, "GPU") != c.gpu {
+			t.Errorf("%s: %q mentions GPU = %v, want %v", c.reason, got, !c.gpu, c.gpu)
 		}
 	}
 }

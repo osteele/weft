@@ -300,9 +300,12 @@ func humanizeFailureReason(reason string) string {
 	case "wall_timeout":
 		return "job exceeded its --wall-time budget, including setup"
 	case "killed_stdout_silence":
-		return "killed: no stdout output for the silence-watchdog timeout"
+		// Both watchdogs read the same activity signal (log growth or
+		// output-directory writes); name it, so a reader does not "fix" a
+		// silence kill by changing GPU work or vice versa.
+		return "killed: no log growth or output-directory writes for the silence-watchdog timeout (override with --stdout-silence-timeout)"
 	case "killed_gpu_idle":
-		return "killed: GPU idle for the GPU-watchdog timeout"
+		return "killed: GPU at 0% and no log growth or output-directory writes for the GPU-watchdog timeout (override with --gpu-idle-timeout)"
 	default:
 		return strings.ReplaceAll(reason, "_", " ")
 	}
