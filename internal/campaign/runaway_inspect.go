@@ -182,9 +182,12 @@ func LookupActiveRunawayBreakers(database *sql.DB) ([]RunawayBreakerInfo, error)
 
 // LookupRunawayBreakerForJob returns the active trip info for the scope
 // covering a particular job, if one exists. The job's project and
-// inferred campaign are used as the scope keys.
+// inferred campaign are used as the scope keys. The breaker pauses the
+// autopilot's launches for unplaced work, so a job already assigned to a
+// host or instance is never held by it; attributing a trip to such a job
+// sends the operator after the wrong blocker (wb173).
 func LookupRunawayBreakerForJob(database *sql.DB, job *db.Job) (*RunawayBreakerInfo, error) {
-	if database == nil || job == nil {
+	if database == nil || job == nil || !job.IsUnplacedAwaitingPlacement() {
 		return nil, nil
 	}
 	all, err := LookupActiveRunawayBreakers(database)
@@ -209,9 +212,10 @@ func LookupRunawayBreakerForJob(database *sql.DB, job *db.Job) (*RunawayBreakerI
 	return nil, nil
 }
 
-// JobsBlockedByBreaker returns the public IDs of currently-queued jobs
-// that share the breaker's scope. Used by `weft autopilot blocked` to
-// list the affected jobs alongside each tripped scope.
+// JobsBlockedByBreaker returns the public IDs of currently-queued unplaced
+// jobs that share the breaker's scope — the jobs whose launches the breaker
+// is actually holding. Used by `weft autopilot blocked` to list the
+// affected jobs alongside each tripped scope.
 func JobsBlockedByBreaker(database *sql.DB, info RunawayBreakerInfo) ([]int64, error) {
 	if database == nil {
 		return nil, nil
@@ -225,18 +229,21 @@ func JobsBlockedByBreaker(database *sql.DB, info RunawayBreakerInfo) ([]int64, e
 		rows, err = database.Query(`
 			SELECT j.id FROM jobs j
 			LEFT JOIN job_status js ON js.id = j.id
-			WHERE js.status = 'queued'
+			WHERE js.status IN (?, ?)
+			  AND js.effective_target_kind = ?
 			  AND COALESCE(j.project, '') = ?
 			  AND j.tombstoned = 0
 			ORDER BY j.id
-		`, info.Project)
+		`, db.StatusQueued, db.StatusPendingPlacement, string(db.JobTargetUnplaced), info.Project)
 	default:
 		rows, err = database.Query(`
 			SELECT j.id FROM jobs j
 			LEFT JOIN job_status js ON js.id = j.id
-			WHERE js.status = 'queued' AND j.tombstoned = 0
+			WHERE js.status IN (?, ?)
+			  AND js.effective_target_kind = ?
+			  AND j.tombstoned = 0
 			ORDER BY j.id
-		`)
+		`, db.StatusQueued, db.StatusPendingPlacement, string(db.JobTargetUnplaced))
 	}
 	if err != nil {
 		return nil, err

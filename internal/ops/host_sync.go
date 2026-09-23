@@ -1343,7 +1343,17 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		}
 
 		if job.Backend != db.BackendSlurm {
-			if err := ensureHFInputsAvailable(database, job.Host, job.Inputs, timeout); err != nil {
+			skipped, err := ensureHFInputsAvailable(database, job.Host, job.Inputs, job.BestEffortInputs, timeout)
+			for _, skip := range skipped {
+				// Inferred inputs are staged opportunistically; the job runs
+				// without them and fails on its own if it really needed one.
+				syncLog.Warn("dispatching without best-effort input", "job_id", job.ID, "host", job.Host, "error", skip)
+				oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+					oplog.WithDetail("best-effort input not staged; dispatching without it"),
+					oplog.WithError(skip),
+				)
+			}
+			if err != nil {
 				if ssh.IsConnectionError(err.Error()) {
 					recordDeferred(job.ID, "input staging deferred (host unreachable)", err)
 					return ensured, contacted, nil
@@ -2376,8 +2386,21 @@ func pluralize(n int) string {
 	return "s"
 }
 
-func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, timeout time.Duration) error {
+// ensureHFInputsAvailable stages a job's HF inputs onto host before dispatch.
+// Inputs listed in bestEffort were inferred from the command or source rather
+// than declared, so the inference can be wrong (an agent harness's
+// `--model provider/model` selector has the shape of an HF repo id): a failed
+// download of one is returned in skipped and does not block dispatch, the
+// same opportunistic contract the cloud agent applies (wb173). Declared inputs
+// stay required. Connection errors are returned for either kind, since they
+// say the host is unreachable rather than that the input is unstageable.
+func ensureHFInputsAvailable(database *sql.DB, host string, inputs, bestEffort []string, timeout time.Duration) (skipped []error, err error) {
+	bestEffortSet := make(map[string]bool, len(bestEffort))
+	for _, ref := range bestEffort {
+		bestEffortSet[ref] = true
+	}
 	var hfInputs []dataloc.DataAsset
+	optional := make(map[string]bool)
 	for _, ref := range inputs {
 		asset, ok := dataloc.ParseAssetRef(ref)
 		if !ok {
@@ -2391,9 +2414,12 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 			continue
 		}
 		hfInputs = append(hfInputs, asset)
+		if bestEffortSet[ref] {
+			optional[asset.String()] = true
+		}
 	}
 	if len(hfInputs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	stageTimeout := hfInputStageTimeout(timeout)
@@ -2403,7 +2429,7 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 
 	plan, err := prestage.BuildPlan(database, host, inventory.HostHFCacheDir(host), inputs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := prestage.Execute(database, plan, stageTimeout); err != nil {
 		// A donor is only an optimization. Its failure says nothing about the
@@ -2420,7 +2446,7 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 	for _, asset := range hfInputs {
 		entries, err := dataloc.FindAssetHosts(database, asset)
 		if err != nil {
-			return err
+			return skipped, err
 		}
 		if slices.ContainsFunc(entries, func(e dataloc.HostDataEntry) bool {
 			return e.Host == host
@@ -2432,15 +2458,19 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 		entry, err := dataloc.DownloadAssetToHost(ctx, host, asset, "main")
 		cancel()
 		if err != nil {
-			return err
+			if optional[asset.String()] && !ssh.IsConnectionError(err.Error()) {
+				skipped = append(skipped, fmt.Errorf("best-effort input %s not staged: %w", asset.String(), err))
+				continue
+			}
+			return skipped, err
 		}
 		entry.LastSeen = time.Now().UTC().Truncate(time.Second)
 		if err := dataloc.RecordAsset(database, entry); err != nil {
-			return err
+			return skipped, err
 		}
 	}
 
-	return nil
+	return skipped, nil
 }
 
 func hfInputStageTimeout(timeout time.Duration) time.Duration {

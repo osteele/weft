@@ -1436,7 +1436,7 @@ func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
 	})
 	t.Cleanup(dataloc.SetDetachedPollIntervalForTest(time.Millisecond))
 
-	if err := ensureHFInputsAvailable(database, "test-host", []string{"hf:bert-base-uncased"}, 5*time.Second); err != nil {
+	if _, err := ensureHFInputsAvailable(database, "test-host", []string{"hf:bert-base-uncased"}, nil, 5*time.Second); err != nil {
 		t.Fatalf("ensureHFInputsAvailable: %v", err)
 	}
 
@@ -1495,7 +1495,7 @@ func TestEnsureHFInputsAvailable_FallsBackAfterDonorConnectionFailure(t *testing
 	})
 	t.Cleanup(dataloc.SetDetachedPollIntervalForTest(time.Millisecond))
 
-	if err := ensureHFInputsAvailable(database, "target-host", []string{"hf:bert-base-uncased"}, 5*time.Second); err != nil {
+	if _, err := ensureHFInputsAvailable(database, "target-host", []string{"hf:bert-base-uncased"}, nil, 5*time.Second); err != nil {
 		t.Fatalf("ensureHFInputsAvailable: %v", err)
 	}
 	if donorCalls == 0 {
@@ -1616,5 +1616,74 @@ func TestFindExistingScpToRemote(t *testing.T) {
 	// Negative case: a different remote host should not match.
 	if pids := findExistingScpToRemote("totally-different-host", remotePath+".weft-staging"); len(pids) > 0 {
 		t.Errorf("findExistingScpToRemote returned %v for unrelated host", pids)
+	}
+}
+
+// An input inferred from the command line (best-effort) that can never be
+// staged — here an agent harness's `--model provider/model` selector that
+// has the shape of an HF repo id — must not hold its job back: the job is
+// dispatched without it, as the cloud agent does. A declared input with the
+// same failure still blocks dispatch (wb173).
+func TestEnsureQueuedJobsOnRemote_BestEffortInputStagingFailureDoesNotBlockDispatch(t *testing.T) {
+	const input = "hf:zhipu-coding-plan/glm-5.3-flash"
+	cases := []struct {
+		name         string
+		bestEffort   bool
+		wantEnsured  int
+		wantAppended int
+	}{
+		{name: "inferred input is skipped", bestEffort: true, wantEnsured: 1, wantAppended: 1},
+		{name: "declared input blocks", bestEffort: false, wantEnsured: 0, wantAppended: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db.SetupTestDB(t)
+			jobID, err := db.RecordQueued(database, "test-host", "", "omp --model zhipu-coding-plan/glm-5.3-flash --print hi", "agent job")
+			if err != nil {
+				t.Fatalf("record queued job: %v", err)
+			}
+			if err := db.SetJobInputs(database, jobID, []string{input}); err != nil {
+				t.Fatalf("set inputs: %v", err)
+			}
+			if tc.bestEffort {
+				if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{BestEffortInputs: []string{input}}); err != nil {
+					t.Fatalf("set metadata: %v", err)
+				}
+			}
+
+			appended := 0
+			mockSSHFunc(t, func(host, command string) (string, string, int) {
+				switch {
+				case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+					return currentRunnerStateJSON + "\n", "", 0
+				case strings.Contains(command, `"op":"add"`):
+					appended++
+					return "", "", 0
+				case strings.Contains(command, "df -Pk"):
+					return "20971520\n", "", 0
+				case strings.Contains(command, "nohup") && strings.Contains(command, "cmd.sh"):
+					return "OK\n", "", 0
+				case strings.Contains(command, `if [ -f "$D/status" ]`):
+					return "STATUS=1\n---STDERR---\nError: Model 'zhipu-coding-plan/glm-5.3-flash' not found.\n", "", 0
+				default:
+					return "", "", 0
+				}
+			})
+			t.Cleanup(dataloc.SetDetachedPollIntervalForTest(time.Millisecond))
+
+			ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
+			if ensured != tc.wantEnsured {
+				t.Fatalf("ensured = %d (err %v), want %d", ensured, err, tc.wantEnsured)
+			}
+			if appended != tc.wantAppended {
+				t.Fatalf("queue appends = %d, want %d", appended, tc.wantAppended)
+			}
+			if tc.bestEffort && err != nil {
+				t.Fatalf("unexpected dispatch error for a best-effort input: %v", err)
+			}
+			if !tc.bestEffort && (err == nil || !strings.Contains(err.Error(), "input staging failed")) {
+				t.Fatalf("err = %v, want input staging failure for a declared input", err)
+			}
+		})
 	}
 }
