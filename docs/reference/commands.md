@@ -1096,6 +1096,15 @@ One-shot list output reads cached database state by default. Use `--sync` when
 you want the command itself to probe remote hosts and cloud state before
 returning; the interactive TUI refreshes live state in the background.
 
+Machine consumers can request `--format json --columns
+id,status_code,submitter_session,project_root`. The version-1 `job_list`
+envelope includes `selection.complete` and selection constraints; consumers
+must reject an incomplete result when reporting counts. `project_root` is the
+stored canonical owning-project path, or JSON `null` when the root has not
+been established. It does not infer a path from `project` or `dir` labels.
+For a complete cached running-job projection use `--running --all --all-hosts
+--limit 0 --no-sync` with those format and column flags.
+
 **Examples:**
 ```bash
 weft job list                          # Recent jobs

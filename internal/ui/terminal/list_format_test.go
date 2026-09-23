@@ -242,6 +242,25 @@ func TestRenderJobListPlainNoTruncate(t *testing.T) {
 	}
 }
 
+func TestRenderJobListProjectRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		root       string
+		noTruncate bool
+	}{
+		{name: "natural width", root: "/workspace/研究"},
+		{name: "untruncated path", root: "/workspace/" + strings.Repeat("long-directory/", 8), noTruncate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := []*db.Job{{ID: 42, ProjectRoot: tc.root}}
+			out := RenderJobListPlainWithOptions(jobs, 80, []string{"id", "project_root"}, tc.noTruncate)
+			if !strings.Contains(out, tc.root) {
+				t.Fatalf("project root missing from table:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestRenderJobListPlainWithColumns(t *testing.T) {
 	jobs := []*db.Job{
 		{

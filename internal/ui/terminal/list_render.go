@@ -209,11 +209,17 @@ func newJobListLayoutSurfaceWithCordon(width int, jobs []*db.Job, columnKeys []s
 		if key == "project" && cd.width == 0 {
 			cd.width = projectWidth
 		}
+		if key == "project_root" {
+			cd.width = columnContentWidth(cd, jobs)
+			if !noTruncate {
+				cd.width = min(cd.width, 60)
+			}
+		}
 		if cli && (key == "started" || key == "killed_at") {
 			// Zone suffixes make CLI time fields variable width; size the
 			// field from the actual formatted values instead of a fixed
 			// width so no value truncates.
-			cd.width = cliTimeColumnWidth(cd, jobs)
+			cd.width = columnContentWidth(cd, jobs)
 		}
 		if key == "description" {
 			hasDescription = true
@@ -235,9 +241,9 @@ func newJobListLayoutSurfaceWithCordon(width int, jobs []*db.Job, columnKeys []s
 	return jobListLayout{width: width, columns: columns, cordoned: cordoned}
 }
 
-// cliTimeColumnWidth returns the display width needed for the widest title or
-// formatted value in a CLI time column.
-func cliTimeColumnWidth(cd columnDef, jobs []*db.Job) int {
+// columnContentWidth returns the display width needed for the widest title or
+// formatted value in a column.
+func columnContentWidth(cd columnDef, jobs []*db.Job) int {
 	w := lipgloss.Width(cd.title)
 	for _, job := range jobs {
 		if job == nil {

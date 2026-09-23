@@ -325,3 +325,55 @@ func TestJobListJSONSelectionOmitsEveryUnappliedConstraint(t *testing.T) {
 		t.Fatal("unapplied constraint was represented by a null value")
 	}
 }
+
+func TestRunningJobJSONPreservesExactProjectAndSubmitterAttribution(t *testing.T) {
+	restoreListFlags(t)
+	stubEmptyQueueStatus(t)
+	database := db.SetupTestDB(t)
+	roots := []any{"/work/one/shared-name", "/work/two/shared-name", nil}
+	want := make(map[int64]any)
+	for index, root := range roots {
+		id, err := db.RecordQueued(database, "host-alpha", "/remote/shared-name/subdir", "echo running", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(`UPDATE jobs SET project = 'shared-name', project_root = ?, submitter_session = ? WHERE id = ?`, root, fmt.Sprintf("session-%d", index), id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.Exec(`UPDATE job_attempts SET status = 'running' WHERE job_id = ?`, id); err != nil {
+			t.Fatal(err)
+		}
+		want[id] = root
+	}
+	listFormat, listAllHosts, listAll, listLimit, listRunning = "json", true, true, 0, true
+	listColumns = []string{"id", "status_code", "submitter_session", "project_root"}
+	document := renderJobListJSONDocument(t, database)
+	if requireJobListJSONSelection(t, document)["complete"] != true {
+		t.Fatal("running projection must be complete")
+	}
+	rows := document["jobs"].([]any)
+	if len(rows) != len(want) {
+		t.Fatalf("running rows = %v, want three jobs", rows)
+	}
+	for _, raw := range rows {
+		row := raw.(map[string]any)
+		id := int64(row["id"].(float64))
+		root, present := row["project_root"]
+		if !present || root != want[id] {
+			t.Errorf("job %d project_root = %v (present=%v), want %v", id, root, present, want[id])
+		}
+		if row["status_code"] != "running" || row["submitter_session"] == "" {
+			t.Errorf("job %d lost state or submitter: %v", id, row)
+		}
+	}
+	model, err := buildJobListModel(database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range model.Jobs {
+		root, _ := want[job.ID].(string)
+		if job.ProjectRoot != root {
+			t.Errorf("database-free model job %d root = %q, want %q", job.ID, job.ProjectRoot, root)
+		}
+	}
+}

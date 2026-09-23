@@ -112,6 +112,16 @@ func allColumnDefs(cli bool) []columnDef {
 			value: func(job *db.Job) string { return formatJobListProject(job) },
 		},
 		{
+			key: "project_root", title: "PROJECT_ROOT", width: 0,
+			value: func(job *db.Job) string { return job.ProjectRoot },
+			jsonValue: func(job *db.Job) any {
+				if job.ProjectRoot == "" {
+					return nil
+				}
+				return job.ProjectRoot
+			},
+		},
+		{
 			key: "dir", title: "DIR", width: 14,
 			value: func(job *db.Job) string { return job.DirectoryTailDisplay() },
 		},

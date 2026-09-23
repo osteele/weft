@@ -124,7 +124,7 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
 	cmd.Flags().StringVar(&listFormat, "format", "table", `Output format: "table", "json", "tsv" (alias: "tab")`)
 	cmd.Flags().BoolVar(&listNoTruncate, "no-truncate", false, "Disable column truncation in table mode")
-	cmd.Flags().StringSliceVar(&listColumns, "columns", nil, "Columns to display (comma-separated: id, host, status, started, project, dir, description, command, exit_code, duration, tags, gpu, submitter_session, kill_actor, kill_reason, killed_at)")
+	cmd.Flags().StringSliceVar(&listColumns, "columns", nil, "Columns to display (comma-separated: id, host, status, started, project, project_root, dir, description, command, exit_code, duration, tags, gpu, submitter_session, kill_actor, kill_reason, killed_at)")
 }
 
 // addListFlags registers all list-related flags on a command.
@@ -295,6 +295,9 @@ func buildJobListModel(database *sql.DB, args []string) (*jobListView, error) {
 	// so the submitter session is populated unconditionally here rather than
 	// per-format at render time.
 	if err := db.PopulateSubmitterSessions(database, jobs); err != nil {
+		return nil, err
+	}
+	if err := db.PopulateProjectRoots(database, jobs); err != nil {
 		return nil, err
 	}
 	if err := db.PopulateKillAttributions(database, jobs); err != nil {
@@ -1348,6 +1351,11 @@ func populateJobAuxiliaryColumns(database *sql.DB, jobs []*db.Job, defaultKeys [
 	}
 	if slices.Contains(keys, "submitter_session") {
 		if err := db.PopulateSubmitterSessions(database, jobs); err != nil {
+			return err
+		}
+	}
+	if slices.Contains(keys, "project_root") {
+		if err := db.PopulateProjectRoots(database, jobs); err != nil {
 			return err
 		}
 	}
