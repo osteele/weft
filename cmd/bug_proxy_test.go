@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,6 +20,24 @@ func captureIssuesCLI(t *testing.T) *[][]string {
 	}
 	t.Cleanup(func() { runIssuesCLI = original })
 	return &calls
+}
+func TestIssuesTrackerRejectsUnstubbedCLI(t *testing.T) {
+	// If the test guard is removed, the proxy can only invoke this harmless
+	// executable, never the user's installed issue tracker.
+	binary := filepath.Join(t.TempDir(), "issues")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalBinary := issuesBinary
+	issuesBinary = binary
+	t.Cleanup(func() { issuesBinary = originalBinary })
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("unstubbed issue reporting was allowed to execute a subprocess")
+		}
+	}()
+	_ = newIssuesBugTracker("weft").Report(db.BugReport{Title: "must remain isolated"})
 }
 
 func argValue(args []string, flag string) (string, bool) {

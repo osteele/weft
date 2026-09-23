@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/osteele/weft/internal/config"
@@ -21,6 +22,15 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "set test data home: %v\n", err)
 		os.Exit(1)
 	}
+	// The shared issue CLI uses its own override, not XDG_DATA_HOME.
+	if err := os.Setenv("AGENT_ISSUES_DB", filepath.Join(dataHome, "issues.db")); err != nil {
+		fmt.Fprintf(os.Stderr, "set test issue ledger: %v\n", err)
+		os.Exit(1)
+	}
+	originalIssuesCLI := runIssuesCLI
+	runIssuesCLI = func(args ...string) error {
+		panic(fmt.Sprintf("unexpected issues CLI in cmd test; stub runIssuesCLI for %q", args))
+	}
 	original := ensurePredictorUsableFunc
 	originalLoadConfig := loadPredictorConfig
 	ensurePredictorUsableFunc = func(*cobra.Command, *config.Config, string) error {
@@ -38,6 +48,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	restoreSourceSync()
 	restoreSSH()
+	runIssuesCLI = originalIssuesCLI
 	ensurePredictorUsableFunc = original
 	loadPredictorConfig = originalLoadConfig
 	if err := os.RemoveAll(dataHome); err != nil && code == 0 {
