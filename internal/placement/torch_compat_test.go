@@ -178,68 +178,6 @@ func TestCompareComputeCap(t *testing.T) {
 	}
 }
 
-func TestArchNameToMaxCap(t *testing.T) {
-	cases := []struct {
-		name string
-		want string
-	}{
-		{"ampere", "8.6"},
-		{"hopper", "9.0"},
-		{"blackwell", "12.0"},
-		{"any", ""},
-		{"", ""},
-		{"unknown-arch", ""},
-		{"AMPERE", "8.6"},
-	}
-	for _, c := range cases {
-		got := ArchNameToMaxCap(c.name)
-		if got != c.want {
-			t.Errorf("ArchNameToMaxCap(%q) = %q, want %q", c.name, got, c.want)
-		}
-	}
-}
-
-func TestMaxComputeCapForJob_Override(t *testing.T) {
-	cases := []struct {
-		archMax string
-		want    string
-	}{
-		{"any", ""},
-		{"hopper", "9.0"},
-		{"9.0", "9.0"},
-		{"12.0", "12.0"},
-		{"unknown", ""},
-	}
-	for _, c := range cases {
-		got := MaxComputeCapForJob(c.archMax, "")
-		if got != c.want {
-			t.Errorf("MaxComputeCapForJob(%q, \"\") = %q, want %q", c.archMax, got, c.want)
-		}
-	}
-}
-
-func TestResolveMaxComputeCapForPersistence(t *testing.T) {
-	// dir="" means ScanTorchPin returns nil — represents a project with no
-	// readable torch pin (pure CPU, missing source, etc.). The persisted-cap
-	// resolver should record "any" rather than "" so downstream readers can
-	// distinguish "explicitly unbounded" from "unresolved".
-	cases := []struct {
-		archMax string
-		want    string
-	}{
-		{"any", "any"},
-		{"hopper", "9.0"},
-		{"9.0", "9.0"},
-		{"", "any"}, // no override + no torch pin → explicit unbounded
-	}
-	for _, c := range cases {
-		got := ResolveMaxComputeCapForPersistence(c.archMax, "")
-		if got != c.want {
-			t.Errorf("ResolveMaxComputeCapForPersistence(%q, \"\") = %q, want %q", c.archMax, got, c.want)
-		}
-	}
-}
-
 func writeTestUVLockCu128(t *testing.T) string {
 	t.Helper()
 	return writeTestUVLockCu128Version(t, "2.9.1")

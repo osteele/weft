@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	toml "github.com/pelletier/go-toml"
@@ -18,14 +19,20 @@ type TorchPin struct {
 	CudaVariant string // e.g. "cu121"; "" if unknown
 }
 
-// TorchRequirement describes the direct torch dependency declared in
-// pyproject.toml. It is intentionally separate from TorchPin: a range like
-// torch>=2.5 proves the project uses torch, but it is not a resolved runtime
-// pin and must not drive placement compatibility as if it were one.
+// TorchRequirement describes a direct torch dependency declaration. It is
+// intentionally separate from TorchPin: a range like torch>=2.5 proves the
+// project uses torch, but it is not a resolved runtime pin and must not drive
+// placement compatibility as if it were one.
 type TorchRequirement struct {
-	Spec    string
+	// Spec is the full PEP 440 specifier set, e.g. ">=2.2,<2.7".
+	Spec string
+	// Version is the first version named in Spec.
 	Version string
 	Exact   bool
+	// Ceiling is the highest torch major.minor release line Spec admits
+	// ("2.6" for ">=2.2,<2.7"), or "" when Spec has no upper bound on the
+	// release line (">=2.2", "~=2.6", "<3") and can resolve the newest torch.
+	Ceiling string
 }
 
 // OpenEndedTorchCUDAFloor is the conservative provider CUDA floor for
@@ -190,19 +197,22 @@ func ScanPyprojectTorchRequirement(dir string) *TorchRequirement {
 	return scanPyprojectTorchRequirement(filepath.Join(root, "pyproject.toml"))
 }
 
+// ScriptTorchCUDAVersion returns the provider CUDA floor implied by the PEP 723
+// script's own torch requirement: the CUDA variant of the release it resolves
+// to (see ScanScriptTorchPin), or OpenEndedTorchCUDAFloor for an open range.
+// It returns "" when the script declares no torch or the variant is unknown.
 func ScriptTorchCUDAVersion(dir, command string) string {
 	req := ScanScriptTorchRequirement(dir, command)
 	if req == nil {
 		return ""
 	}
+	if pin := ScanScriptTorchPin(dir, command); pin != nil {
+		return CUDAVariantVersion(pin.CudaVariant)
+	}
 	if !req.Exact {
 		return OpenEndedTorchCUDAFloor
 	}
-	pin := ScanScriptTorchPin(dir, command)
-	if pin == nil {
-		return ""
-	}
-	return CUDAVariantVersion(pin.CudaVariant)
+	return ""
 }
 
 func scanFileForTorch(f *os.File) bool {
@@ -505,8 +515,9 @@ func torchRequirementFromDeps(tree *toml.Tree) *TorchRequirement {
 }
 
 var (
-	pep508TorchRe  = regexp.MustCompile(`^\s*torch(?:\[[^\]]*\])?\s*([<>=!~]=?[^,;]*)`)
+	pep508TorchRe  = regexp.MustCompile(`^\s*torch(?:\[[^\]]*\])?\s*([<>=!~]=?[^;]*)`)
 	versionTokenRe = regexp.MustCompile(`(\d+(?:\.\d+){0,2})`)
+	releaseRe      = regexp.MustCompile(`^\d+(?:\.\d+)*`)
 )
 
 // extractTorchVersionString parses a single requirement string. It handles
@@ -545,7 +556,111 @@ func parseTorchRequirementString(req string) *TorchRequirement {
 		Spec:    spec,
 		Version: versionTokenRe.FindString(spec),
 		Exact:   strings.HasPrefix(spec, "==") && !strings.HasPrefix(spec, "==="),
+		Ceiling: torchSpecCeiling(spec),
 	}
+}
+
+// torchSpecCeiling returns the highest major.minor release line a PEP 440
+// specifier set admits, or "" when no clause bounds the release line.
+// Clauses are AND-combined, so the lowest bounded clause wins.
+func torchSpecCeiling(spec string) string {
+	var bestMaj, bestMin int
+	bounded := false
+	for _, part := range strings.Split(spec, ",") {
+		maj, min, ok := specClauseCeiling(strings.TrimSpace(part))
+		if !ok {
+			continue
+		}
+		if !bounded || maj < bestMaj || (maj == bestMaj && min < bestMin) {
+			bestMaj, bestMin, bounded = maj, min, true
+		}
+	}
+	if !bounded {
+		return ""
+	}
+	return strconv.Itoa(bestMaj) + "." + strconv.Itoa(bestMin)
+}
+
+// specClauseCeiling returns the highest major.minor line one specifier clause
+// admits. ok is false for clauses without an upper bound (>=, >, !=) and for
+// bounds that leave the minor line open within a major ("<3", "~=2.6",
+// "==2.*").
+func specClauseCeiling(clause string) (maj, min int, ok bool) {
+	m := specOpRe.FindStringSubmatch(clause)
+	if m == nil {
+		return 0, 0, false
+	}
+	op, ver := m[1], stripLocal(m[2])
+	switch op {
+	case "==", "===":
+		if strings.HasSuffix(ver, ".*") {
+			ver = strings.TrimSuffix(ver, ".*")
+			if !strings.Contains(ver, ".") {
+				return 0, 0, false
+			}
+		}
+		return releaseLine(ver)
+	case "<=":
+		return releaseLine(ver)
+	case "<":
+		return lineBelow(ver)
+	case "~=":
+		if upper := compatibleReleaseUpperBound(ver); upper != "" {
+			return lineBelow(upper)
+		}
+	}
+	return 0, 0, false
+}
+
+// releaseLine returns the major.minor line containing version v ("2.6.3" ->
+// 2.6; "2" -> 2.0).
+func releaseLine(v string) (maj, min int, ok bool) {
+	parts := releaseParts(v)
+	if len(parts) == 0 {
+		return 0, 0, false
+	}
+	if len(parts) == 1 {
+		return parts[0], 0, true
+	}
+	return parts[0], parts[1], true
+}
+
+// lineBelow returns the highest major.minor line containing a release strictly
+// below v. "<2.7" admits the 2.6 line; "<2.7.1" admits 2.7.0. "<3" and "<3.0"
+// admit every 2.x release, which leaves the line open.
+func lineBelow(v string) (maj, min int, ok bool) {
+	parts := releaseParts(v)
+	if len(parts) == 0 {
+		return 0, 0, false
+	}
+	for i := 2; i < len(parts); i++ {
+		if parts[i] != 0 {
+			return releaseLine(v)
+		}
+	}
+	if len(parts) < 2 || parts[1] == 0 {
+		return 0, 0, false
+	}
+	return parts[0], parts[1] - 1, true
+}
+
+// releaseParts parses the numeric release segment of a PEP 440 version,
+// ignoring pre/post/dev suffixes.
+func releaseParts(v string) []int {
+	rel := releaseRe.FindString(strings.TrimSpace(v))
+	if rel == "" {
+		return nil
+	}
+	fields := strings.Split(rel, ".")
+	out := make([]int, len(fields))
+	for i, f := range fields {
+		n, err := strconv.Atoi(f)
+		if err != nil {
+			return nil
+		}
+		out[i] = n
+	}
+	return out
 }
 
 // cudaVariantFromUvTree returns the cuXXX tag implied by [tool.uv] settings,

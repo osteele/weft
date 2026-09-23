@@ -159,9 +159,11 @@ func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode, meta *datal
 	if scriptReq != nil {
 		if mode == RuntimeFloorExact {
 			if scriptCUDA := dataloc.ScriptTorchCUDAVersion(dir, command); scriptCUDA != "" {
-				origin := "script PEP 723 torch dependency"
-				if !scriptReq.Exact {
-					origin = "script PEP 723 torch open range"
+				origin := "script PEP 723 torch open range"
+				if scriptReq.Exact {
+					origin = "script PEP 723 torch dependency"
+				} else if scriptReq.Ceiling != "" {
+					origin = fmt.Sprintf("script PEP 723 torch %s (resolves %s)", strings.TrimSpace(scriptReq.Spec), scriptReq.Ceiling)
 				}
 				rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: scriptCUDA}, origin)
 			}

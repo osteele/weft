@@ -100,6 +100,26 @@ func ResolveTorchMaxComputeCapForPersistence(archMax, dir string) string {
 	return TorchMaxComputeCap(pin.Version, pin.CudaVariant)
 }
 
+// ResolveJobTorchMaxComputeCapForPersistence resolves the persisted cap
+// encoding (see ResolveTorchMaxComputeCapForPersistence) for a job command.
+// Precedence: an explicit script [tool.weft] gpu-arch-max; then the torch
+// release the PEP 723 script's own requirement determines (an exact pin or an
+// upper bound), because `uv run <script>` imports torch from the script
+// environment rather than the project lock (wb166); then the project torch
+// pin, which also covers scripts with an open torch range.
+func ResolveJobTorchMaxComputeCapForPersistence(dir, command string) string {
+	archMax := ""
+	if meta, err := ScanScriptMeta(dir, command); err == nil && meta != nil {
+		archMax = meta.GPUArchMax
+	}
+	if strings.TrimSpace(archMax) == "" {
+		if pin := ScanScriptTorchPin(dir, command); pin != nil {
+			return TorchMaxComputeCap(pin.Version, pin.CudaVariant)
+		}
+	}
+	return ResolveTorchMaxComputeCapForPersistence(archMax, dir)
+}
+
 func TorchMinComputeCapForDir(dir string) string {
 	pin := ScanTorchPin(dir)
 	if pin == nil {

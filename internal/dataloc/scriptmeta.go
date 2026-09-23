@@ -298,10 +298,23 @@ func ScanScriptTorchRequirement(dir, command string) *TorchRequirement {
 	return nil
 }
 
+// ScanScriptTorchPin returns the torch release and CUDA wheel variant a PEP 723
+// script environment resolves to, as far as the script's own requirement
+// determines it: the pinned version for `torch==X`, or the highest release line
+// an upper bound admits (`torch>=2.2,<2.7` -> 2.6), since uv resolves the newest
+// admitted release. It returns nil for an open range, whose resolved release is
+// whatever torch is newest.
 func ScanScriptTorchPin(dir, command string) *TorchPin {
 	for _, tree := range scanScriptPEP723Trees(dir, command) {
 		req := scriptTorchRequirementFromTree(tree)
-		if req == nil || !req.Exact || req.Version == "" {
+		if req == nil {
+			continue
+		}
+		version := req.Ceiling
+		if req.Exact {
+			version = req.Version
+		}
+		if version == "" {
 			continue
 		}
 		cuda := ""
@@ -311,12 +324,12 @@ func ScanScriptTorchPin(dir, command string) *TorchPin {
 			}
 		}
 		if cuda == "" {
-			maj, min, ok := parseTorchMajMin(req.Version)
+			maj, min, ok := parseTorchMajMin(version)
 			if ok {
 				cuda = defaultTorchCudaVariant(maj, min)
 			}
 		}
-		return &TorchPin{Version: req.Version, CudaVariant: cuda}
+		return &TorchPin{Version: version, CudaVariant: cuda}
 	}
 	return nil
 }

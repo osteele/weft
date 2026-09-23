@@ -77,56 +77,6 @@ func CompareComputeCap(a, b string) int {
 	return 0
 }
 
-// ArchNameToMaxCap maps a named arch ("ampere", "hopper", "blackwell", "any")
-// to the highest cap admitted by that name. "any" -> "" (no bound). Unknown
-// names also return "".
-func ArchNameToMaxCap(name string) string {
-	n := strings.ToLower(strings.TrimSpace(name))
-	if n == "" || n == "any" {
-		return ""
-	}
-	gen, ok := generationNames[normalizeGPUClass(n)]
-	if !ok {
-		return ""
-	}
-	if gen.isNVIDIA() {
-		return gpucatalog.GenerationDefaultComputeCap(gpucatalog.Generation(gen))
-	}
-	return ""
-}
-
-// MaxComputeCapForJob resolves the GPU compute-capability upper bound for a
-// job whose source lives in dir. Resolution order:
-//
-//  1. An explicit gpu-arch-max from script metadata wins. "any" disables
-//     filtering. A numeric cap ("9.0") is used directly. A generation name
-//     ("hopper") is mapped via ArchNameToMaxCap.
-//  2. Otherwise infer from the project's torch pin
-//     (dataloc.ScanTorchPin + TorchMaxComputeCap).
-//  3. If neither yields a bound, returns "" (no filter).
-func MaxComputeCapForJob(archMax, dir string) string {
-	override := strings.ToLower(strings.TrimSpace(archMax))
-	switch {
-	case override == "any":
-		return ""
-	case override == "":
-		// fall through to inference
-	default:
-		if _, ok := parseComputeCap(override); ok {
-			return override
-		}
-		if cap := ArchNameToMaxCap(override); cap != "" {
-			return cap
-		}
-		return ""
-	}
-	pin := dataloc.ScanTorchPin(dir)
-	if pin == nil {
-		return ""
-	}
-	return TorchMaxComputeCap(pin.Version, pin.CudaVariant)
-}
-
 // MinComputeCapForJob resolves the GPU compute-capability lower bound for a
 // job whose source lives in dir. It is inferred from the project's torch pin;
 // explicit gpu-arch-max metadata only controls the upper bound.
@@ -285,17 +235,21 @@ func mergeScriptTorchRuntimeFloor(rf *RuntimeFloor, req *dataloc.TorchRequiremen
 	if req == nil {
 		return
 	}
-	if !req.Exact {
-		origin := fmt.Sprintf("script PEP 723 torch %s (open range)", strings.TrimSpace(req.Spec))
-		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: dataloc.OpenEndedTorchCUDAFloor}, origin)
+	spec := strings.TrimSpace(req.Spec)
+	if pin == nil {
+		if !req.Exact {
+			origin := fmt.Sprintf("script PEP 723 torch %s (open range)", spec)
+			rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: dataloc.OpenEndedTorchCUDAFloor}, origin)
+		}
 		return
 	}
-	if pin == nil {
-		return
+	label := fmt.Sprintf("script PEP 723 torch %s+%s", pin.Version, pin.CudaVariant)
+	if !req.Exact {
+		label = fmt.Sprintf("script PEP 723 torch %s (resolves %s+%s)", spec, pin.Version, pin.CudaVariant)
 	}
 	if family := dataloc.CUDAFamilyFloor(pin.CudaVariant); family != "" {
 		major, _, _ := strings.Cut(family, ".")
-		origin := fmt.Sprintf("script PEP 723 torch %s+%s (CUDA %s.x family)", pin.Version, pin.CudaVariant, major)
+		origin := fmt.Sprintf("%s (CUDA %s.x family)", label, major)
 		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: family}, origin)
 	}
 	if cuda, origin := torchOperationalCUDAFloor(pin); cuda != "" {
@@ -371,29 +325,13 @@ func ToolchainFloorForJob(dir, command string) dataloc.ToolchainFloor {
 // MaxComputeCapAny is the persisted-cap sentinel for "explicitly unbounded".
 const MaxComputeCapAny = dataloc.MaxComputeCapAny
 
-// ResolveMaxComputeCapForPersistence returns the three-state encoding stored
-// on jobs.max_compute_cap:
-//
-//	MaxComputeCapAny ("any")  explicitly unbounded
-//	"X.Y"                     concrete numeric cap (e.g. "10.0", "12.0")
-//	""                        torch was pinned but no cap could be derived
-//	                          (caller decides whether to warn or retry)
-//
-// Distinguishes "explicitly unbounded" from "unresolved" so readers can lazily
-// backfill empty caps without conflating them with intentional no-bound jobs.
-func ResolveMaxComputeCapForPersistence(archMax, dir string) string {
-	return dataloc.ResolveTorchMaxComputeCapForPersistence(archMax, dir)
-}
-
-// ResolveJobMaxComputeCapForPersistence reads the script's gpu-arch-max
-// override (if any) and returns the persistence-encoded cap. Used at submit,
-// and again as a lazy backfill on the launch path for legacy/refreshed rows.
+// ResolveJobMaxComputeCapForPersistence returns the persistence-encoded cap for
+// a job command, honoring script gpu-arch-max and the PEP 723 script's own
+// torch requirement ahead of the project torch pin (see
+// dataloc.ResolveJobTorchMaxComputeCapForPersistence). Used at submit, and
+// again as a lazy backfill on the launch path for legacy/refreshed rows.
 func ResolveJobMaxComputeCapForPersistence(localDir, command string) string {
-	archMax := ""
-	if meta, err := dataloc.ScanScriptMeta(localDir, command); err == nil && meta != nil {
-		archMax = meta.GPUArchMax
-	}
-	return ResolveMaxComputeCapForPersistence(archMax, localDir)
+	return dataloc.ResolveJobTorchMaxComputeCapForPersistence(localDir, command)
 }
 
 // parseComputeCap parses "9.0", "10.0", "12.0" etc. into a float. Returns

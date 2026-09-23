@@ -122,11 +122,7 @@ func explicitJobInputs(job *db.Job) []string {
 // metadata refreshes. Keep this in ops to avoid importing placement here; the
 // launch path still re-resolves empty caps as a second line of defense.
 func ResolveProjectMaxComputeCap(localDir, command string) string {
-	archMax := ""
-	if meta, err := dataloc.ScanScriptMeta(localDir, command); err == nil && meta != nil {
-		archMax = meta.GPUArchMax
-	}
-	return dataloc.ResolveTorchMaxComputeCapForPersistence(archMax, localDir)
+	return dataloc.ResolveJobTorchMaxComputeCapForPersistence(localDir, command)
 }
 
 func mergeStringSlices(a, b []string) []string {
