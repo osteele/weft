@@ -31,6 +31,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Machine-readable job lists**: Explicit sync writes status summaries to stderr,
+  keeping JSON and TSV stdout free of human-readable sync diagnostics.
 - **CUDA failure attribution and retry history**: Hardware-fault detection
   requires diagnostic Xid, NVLink, peer-memory, or ECC evidence, so ordinary
   output such as "oxidized" cannot terminate a GPU job. Job info reports the

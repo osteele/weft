@@ -1559,7 +1559,7 @@ func performListSync(database *sql.DB) error {
 	}
 
 	if updated > 0 {
-		fmt.Printf("(synced %d job status(es))\n", updated)
+		fmt.Fprintf(os.Stderr, "(synced %d job status(es))\n", updated)
 	}
 
 	return nil
@@ -1576,7 +1576,7 @@ func performListSyncForHost(database *sql.DB, host string) error {
 	}
 
 	if result.Updated > 0 {
-		fmt.Printf("(synced %d job status(es))\n", result.Updated)
+		fmt.Fprintf(os.Stderr, "(synced %d job status(es))\n", result.Updated)
 	}
 
 	return nil

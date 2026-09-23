@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
@@ -458,6 +460,89 @@ func TestRunListPlainExplicitSyncRefreshes(t *testing.T) {
 
 	if calls != 1 {
 		t.Fatalf("explicit plain list sync calls = %d, want 1", calls)
+	}
+}
+
+func TestRunListPlainExplicitSyncKeepsJSONStdoutClean(t *testing.T) {
+	for _, host := range []string{"", "host-alpha"} {
+		name := "all_hosts"
+		if host != "" {
+			name = "host_specific"
+		}
+		t.Run(name, func(t *testing.T) {
+			restoreListFlags(t)
+			inventory.UseTestHosts(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			database := db.SetupTestDB(t)
+			jobID, err := db.RecordJobStarting(database, "host-alpha", "/tmp", "echo done", "synced list")
+			if err != nil {
+				t.Fatalf("RecordJobStarting: %v", err)
+			}
+			startTime := time.Now().Add(-time.Minute).Unix()
+			if _, err := database.Exec(`UPDATE job_attempts SET session_name = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`,
+				"list-sync-complete", startTime, jobID); err != nil {
+				t.Fatalf("set tmux session: %v", err)
+			}
+			if err := db.MarkRunningByID(database, jobID); err != nil {
+				t.Fatalf("MarkRunningByID: %v", err)
+			}
+			// Exercise the real sync and its Updated > 0 summary, replacing only
+			// SSH with a completed tmux job's status-file response.
+			t.Cleanup(ssh.SetRunner(func(_ string, command string) (string, string, error) {
+				switch {
+				case strings.Contains(command, "tmux has-session"):
+					return "NO\n", "", nil
+				case strings.Contains(command, "|MTIME|"):
+					return fmt.Sprintf("0\n|MTIME|\n%d\n", startTime+5), "", nil
+				default:
+					return "", "", nil
+				}
+			}))
+			listAll, listAllHosts, listSync = true, true, true
+			listHost, listFormat, listLimit = host, "json", 0
+			listColumns = []string{"id", "status_code"}
+
+			var stdout string
+			stderr := captureStderr(t, func() {
+				stdout = captureStdout(t, func() {
+					if err := runListPlain(context.Background(), database, nil); err != nil {
+						t.Fatalf("runListPlain: %v", err)
+					}
+				})
+			})
+
+			updated, err := db.GetJobByID(database, jobID)
+			if err != nil {
+				t.Fatalf("GetJobByID: %v", err)
+			}
+			if updated.Status != db.StatusCompleted {
+				t.Fatalf("sync left job %d in %s, want completed", jobID, updated.Status)
+			}
+			if !strings.Contains(stderr, "synced") {
+				t.Errorf("stderr missing sync diagnostic: %q", stderr)
+			}
+			decoder := json.NewDecoder(strings.NewReader(stdout))
+			var document struct {
+				Jobs []struct {
+					ID int64 `json:"id"`
+				} `json:"jobs"`
+			}
+			if err := decoder.Decode(&document); err != nil {
+				t.Fatalf("decode list JSON: %v; stdout = %q", err, stdout)
+			}
+			if len(document.Jobs) != 1 || document.Jobs[0].ID != jobID {
+				t.Fatalf("JSON jobs = %+v, want job %d", document.Jobs, jobID)
+			}
+			// A summary written after the soft deadline must not trail the JSON
+			// document either.
+			var extra any
+			if err := decoder.Decode(&extra); err != io.EOF {
+				t.Fatalf("stdout after JSON: error = %v, value = %v; want EOF", err, extra)
+			}
+		})
 	}
 }
 
