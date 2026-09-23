@@ -27,6 +27,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/r2resolve"
@@ -680,6 +681,11 @@ type resolvedArtifact struct {
 	Source      artifactSource
 	RunID       *int64 // attempt/run ID that produced this artifact, when known
 
+	// sizeKnown reports that a cloud row's SizeBytes was observed (listing
+	// or HEAD probe). When false, delivery treats the object as too large
+	// to buffer through the cache.
+	sizeKnown bool
+
 	// Retrieval handles; exactly one is non-nil, matching Source.
 	cacheEntry *db.Artifact           // cache: bytes already in the local store
 	hostEntry  *dataloc.HostDataEntry // host: pointer record; requires syncArtifactOnDemand
@@ -745,6 +751,7 @@ func resolveJobArtifacts(database *sql.DB, r2Client cloudOutputStore, job *db.Jo
 				DisplayPath: file.RelPath,
 				RelPath:     file.RelPath,
 				SizeBytes:   file.SizeBytes,
+				sizeKnown:   true,
 				Source:      artifactSourceCloud,
 				RunID:       runID,
 				cloudFile:   &file,
@@ -858,14 +865,11 @@ func deliverCloudArtifactAndCache(cmd *cobra.Command, database *sql.DB, r2Client
 		localCachePath = filepath.Join(localRoot, storedPath)
 	}
 
-	knownSize := art.SizeBytes
-	if knownSize <= 0 && art.cloudFile != nil {
-		knownSize = art.cloudFile.SizeBytes
-	}
-
 	if dest == "-" {
-		// If known size exceeds cache threshold or caching is disabled, stream directly to stdout.
-		if knownSize > maxWriteThroughCacheSizeBytes || !canCache {
+		// Stream directly when caching is disabled or the object is not known
+		// to fit the write-through threshold: an unknown size must not buffer
+		// a multi-GB object to disk before the first byte reaches stdout.
+		if !canCache || !art.sizeKnown || art.SizeBytes > maxWriteThroughCacheSizeBytes {
 			return downloadSingleCloudFileToPath(cmd, r2Client, job, *art.cloudFile, "-", false)
 		}
 
@@ -873,14 +877,19 @@ func deliverCloudArtifactAndCache(cmd *cobra.Command, database *sql.DB, r2Client
 			return downloadSingleCloudFileToPath(cmd, r2Client, job, *art.cloudFile, "-", false)
 		}
 
-		// Download to temporary stream file in cache directory
-		tmpPath := localCachePath + ".stream-part"
+		// Buffer into a per-invocation temp file in the cache directory so
+		// concurrent readers of the same artifact cannot collide.
+		tmp, err := os.CreateTemp(filepath.Dir(localCachePath), filepath.Base(localCachePath)+".stream-*")
+		if err != nil {
+			return downloadSingleCloudFileToPath(cmd, r2Client, job, *art.cloudFile, "-", false)
+		}
+		tmpPath := tmp.Name()
+		_ = tmp.Close()
+		defer func() { _ = os.Remove(tmpPath) }()
 		size, sha, dlErr := downloadSingleCloudFileToPathWithHash(cmd, r2Client, job, *art.cloudFile, tmpPath, false)
 		if dlErr != nil {
-			_ = os.Remove(tmpPath)
 			return dlErr
 		}
-		defer func() { _ = os.Remove(tmpPath) }()
 
 		// Stream the downloaded file to stdout (never download twice)
 		if err := copyToWriter(tmpPath, cmd.OutOrStdout()); err != nil {
@@ -922,6 +931,10 @@ func deliverCloudArtifactAndCache(cmd *cobra.Command, database *sql.DB, r2Client
 	return nil
 }
 
+// recordDeliveredArtifactInDB records a write-through cache fill. The stored
+// file may already be described by a row sync wrote under its manifest name;
+// that row keeps its name and path and takes the new size and checksum, so
+// one stored file is never described by two rows with different bytes.
 func recordDeliveredArtifactInDB(database *sql.DB, job *db.Job, art resolvedArtifact, storedPath string, size int64, sha string) {
 	if database == nil || job == nil || storedPath == "" {
 		return
@@ -932,11 +945,21 @@ func recordDeliveredArtifactInDB(database *sql.DB, job *db.Job, art resolvedArti
 			runID = &rid
 		}
 	}
+	name, relPath := art.Name, art.RelPath
+	existing, err := db.FindArtifactByStoredPath(database, job.ID, runID, storedPath)
+	switch {
+	case err == nil:
+		name, relPath = existing.Name, existing.Path
+	case !errors.Is(err, sql.ErrNoRows):
+		// Whether a row already describes this file is unknown; inserting
+		// could duplicate it, and the cached bytes serve without a row.
+		return
+	}
 	_ = db.UpsertArtifact(database, db.Artifact{
 		JobID:      job.ID,
 		JobRunID:   runID,
-		Name:       art.Name,
-		Path:       art.RelPath,
+		Name:       name,
+		Path:       relPath,
 		StoredPath: storedPath,
 		SizeBytes:  size,
 		SHA256:     sha,
@@ -971,46 +994,55 @@ type attemptPublicationMatch struct {
 	RunID      int64
 }
 
+// recordedAttemptPublicationArtifact returns the ready publication row for a
+// declared artifact of jobID (restricted to attempt runID when positive).
+// Like the producer-need consumer in internal/ops, it accepts only rows whose
+// state is ready and whose payload key lies under the producing attempt's
+// own prefixes: pending/failed rows and foreign keys yield an empty match,
+// so callers fall through to normal resolution instead of fetching a key
+// that does not back this attempt's artifact (wb168).
 func recordedAttemptPublicationArtifact(database *sql.DB, jobID, runID int64, artifactPath, name string) attemptPublicationMatch {
 	if database == nil {
 		return attemptPublicationMatch{}
 	}
 	cleanedRel := filepath.ToSlash(artifacts.LocalRelativePath(artifactPath))
-	var match attemptPublicationMatch
-	if runID > 0 {
-		err := database.QueryRow(`
-			SELECT apa.payload_key, COALESCE(apa.path, ''), COALESCE(apa.name, ''), ja.id
-			FROM attempt_publication_artifacts apa
-			JOIN job_attempts ja ON ja.id = apa.attempt_id
-			WHERE ja.job_id = ? AND ja.id = ?
-			  AND (apa.name = ? OR apa.path = ? OR apa.path = ? OR apa.name = ?)
-			  AND apa.payload_key IS NOT NULL AND apa.payload_key != ''
-			ORDER BY apa.ready_at DESC, apa.sequence DESC LIMIT 1`,
-			jobID, runID, name, artifactPath, cleanedRel, cleanedRel).Scan(&match.PayloadKey, &match.Path, &match.Name, &match.RunID)
-		if err == nil {
-			return match
-		}
-		return attemptPublicationMatch{}
-	}
-	err := database.QueryRow(`
+	query := `
 		SELECT apa.payload_key, COALESCE(apa.path, ''), COALESCE(apa.name, ''), ja.id
 		FROM attempt_publication_artifacts apa
 		JOIN job_attempts ja ON ja.id = apa.attempt_id
-		WHERE ja.job_id = ?
-		  AND (apa.name = ? OR apa.path = ? OR apa.path = ? OR apa.name = ?)
-		  AND apa.payload_key IS NOT NULL AND apa.payload_key != ''
-		ORDER BY apa.ready_at DESC, apa.sequence DESC LIMIT 1`,
-		jobID, name, artifactPath, cleanedRel, cleanedRel).Scan(&match.PayloadKey, &match.Path, &match.Name, &match.RunID)
-	if err == nil {
-		return match
+		WHERE ja.job_id = ?`
+	args := []any{jobID}
+	if runID > 0 {
+		query += ` AND ja.id = ?`
+		args = append(args, runID)
 	}
-	return attemptPublicationMatch{}
+	query += `
+		  AND (apa.name = ? OR apa.path = ? OR apa.path = ? OR apa.name = ?)
+		  AND apa.state = ?
+		  AND apa.payload_key IS NOT NULL AND apa.payload_key != ''
+		ORDER BY apa.ready_at DESC, apa.sequence DESC LIMIT 1`
+	args = append(args, name, artifactPath, cleanedRel, cleanedRel, db.PublicationStateReady)
+	var match attemptPublicationMatch
+	if err := database.QueryRow(query, args...).Scan(&match.PayloadKey, &match.Path, &match.Name, &match.RunID); err != nil {
+		return attemptPublicationMatch{}
+	}
+	match.PayloadKey = strings.TrimSpace(match.PayloadKey)
+	if !ops.PublishedKeyBelongsToAttempt(match.PayloadKey, jobID, match.RunID) {
+		return attemptPublicationMatch{}
+	}
+	return match
 }
 
 func recordedAttemptPublicationPayloadKey(database *sql.DB, jobID, runID int64, artifactPath, name string) string {
 	return recordedAttemptPublicationArtifact(database, jobID, runID, artifactPath, name).PayloadKey
 }
 
+// directCloudArtifactForToken resolves token to one R2 object without listing
+// the job's prefixes: first through a ready, attempt-owned publication row,
+// then through a declared output's convention key under the latest attempt.
+// The object is HEAD-probed so the row carries its size; a confirmed-absent
+// object yields no fast path, and a publication row whose probe fails keeps
+// its key with an unknown size.
 func directCloudArtifactForToken(database *sql.DB, store cloudOutputStore, job *db.Job, token string) (resolvedArtifact, bool) {
 	if job == nil {
 		return resolvedArtifact{}, false
@@ -1019,27 +1051,16 @@ func directCloudArtifactForToken(database *sql.DB, store cloudOutputStore, job *
 	if database != nil {
 		match := recordedAttemptPublicationArtifact(database, job.ID, 0, cleaned, cleaned)
 		if match.PayloadKey != "" {
+			size, err := store.ObjectSize(context.Background(), match.PayloadKey)
+			if err == nil && size < 0 {
+				return resolvedArtifact{}, false
+			}
 			rel := match.Path
 			if rel == "" {
 				rel = cleaned
 			}
-			var runID *int64
-			if match.RunID > 0 {
-				runID = &match.RunID
-			} else if rid := r2keys.ExtractRunID(match.PayloadKey); rid > 0 {
-				runID = &rid
-			}
-			return resolvedArtifact{
-				Name:        match.Name,
-				DisplayPath: rel,
-				RelPath:     rel,
-				Source:      artifactSourceCloud,
-				RunID:       runID,
-				cloudFile: &runner.OutputFile{
-					RelPath: rel,
-					R2Key:   match.PayloadKey,
-				},
-			}, true
+			runID := match.RunID
+			return directCloudRow(match.Name, rel, match.PayloadKey, &runID, size, err == nil), true
 		}
 	}
 
@@ -1062,21 +1083,31 @@ func directCloudArtifactForToken(database *sql.DB, store cloudOutputStore, job *
 	}
 
 	keyCandidate := r2keys.JobAttemptOutputsPrefix(job.ID, *runID) + cleaned
-	exists, err := store.ObjectExists(context.Background(), keyCandidate)
-	if err != nil || !exists {
+	size, err := store.ObjectSize(context.Background(), keyCandidate)
+	if err != nil || size < 0 {
 		return resolvedArtifact{}, false
 	}
+	return directCloudRow("", cleaned, keyCandidate, runID, size, true), true
+}
 
+func directCloudRow(name, rel, key string, runID *int64, size int64, sizeKnown bool) resolvedArtifact {
+	if !sizeKnown {
+		size = 0
+	}
 	return resolvedArtifact{
-		DisplayPath: cleaned,
-		RelPath:     cleaned,
+		Name:        name,
+		DisplayPath: rel,
+		RelPath:     rel,
+		SizeBytes:   size,
+		sizeKnown:   sizeKnown,
 		Source:      artifactSourceCloud,
 		RunID:       runID,
 		cloudFile: &runner.OutputFile{
-			RelPath: cleaned,
-			R2Key:   keyCandidate,
+			RelPath:   rel,
+			R2Key:     key,
+			SizeBytes: size,
 		},
-	}, true
+	}
 }
 
 // deliverArtifactToken retrieves the artifact named token for one job and
@@ -1343,6 +1374,8 @@ type cloudOutputStore interface {
 	cloudOutputDownloader
 	cloudOutputLister
 	ObjectExists(context.Context, string) (bool, error)
+	// ObjectSize HEADs key: its size when present, -1 when confirmed absent.
+	ObjectSize(context.Context, string) (int64, error)
 }
 
 // downloadSingleCloudFileToPath resolves the listed file to a concrete R2 key
@@ -3523,10 +3556,14 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 				objectKeys = append(objectKeys, candidate)
 			}
 		}
+		// A workdir-relative declaration outside the configured output dirs
+		// may still have been captured under outputs/ (the uploader's
+		// captured-output mapping). Decide from the raw declaration: an
+		// absolute or escaping path has no workdir-relative spelling, and
+		// its sanitized basename must not probe an unrelated outputs/ object.
 		if strings.TrimSpace(manifest.ArtifactRoot) == "" {
-			slashRel := filepath.ToSlash(relPath)
-			if slashRel != "" && !strings.HasPrefix(slashRel, "../") && !strings.HasPrefix(slashRel, "/") {
-				candidate := outputsPrefix + slashRel
+			if workdirRel, ok := artifacts.DeclaredWorkdirRelPath(spec.Path); ok {
+				candidate := outputsPrefix + workdirRel
 				if !slices.Contains(objectKeys, candidate) {
 					objectKeys = append(objectKeys, candidate)
 				}

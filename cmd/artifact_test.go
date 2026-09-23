@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -140,7 +141,8 @@ func TestCopyToWriter(t *testing.T) {
 type fakeCloudArtifactStore struct {
 	objects              map[string][]byte
 	objectExistsOverride map[string]bool
-	listErr              error // when set, ListObjects returns this for every prefix
+	objectSizeErr        map[string]error // ObjectSize (HEAD) fails for these keys
+	listErr              error            // when set, ListObjects returns this for every prefix
 	// listDelay stalls ListObjects for the given prefix, so a test can fix
 	// the order in which concurrent listings return.
 	listDelay map[string]time.Duration
@@ -162,6 +164,17 @@ func (s *fakeCloudArtifactStore) ObjectExists(_ context.Context, key string) (bo
 	}
 	_, ok := s.objects[key]
 	return ok, nil
+}
+
+func (s *fakeCloudArtifactStore) ObjectSize(ctx context.Context, key string) (int64, error) {
+	if err := s.objectSizeErr[key]; err != nil {
+		return 0, err
+	}
+	exists, err := s.ObjectExists(ctx, key)
+	if err != nil || !exists {
+		return -1, err
+	}
+	return int64(len(s.objects[key])), nil
 }
 
 func (s *fakeCloudArtifactStore) GetObjectReader(_ context.Context, key string) (io.ReadCloser, error) {
@@ -2168,7 +2181,7 @@ func TestSyncCloudJobArtifactsWithStore_RecordedAttemptPublicationKey(t *testing
 
 	manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, runID)
 	const relPath = ".agent-execution/results/worker-result.json"
-	customPayloadKey := fmt.Sprintf("jobs/%d/runs/%d/custom-payloads/worker-result.json", job.ID, runID)
+	customPayloadKey := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "custom-payloads/worker-result.json"
 
 	_, err = database.Exec(`
 		INSERT INTO attempt_publication_artifacts
@@ -2358,7 +2371,7 @@ func TestDeliverArtifactToken_FastPath_AttemptPublicationKey(t *testing.T) {
 	}
 
 	const relPath = ".agent-execution/results/worker-result.json"
-	customKey := fmt.Sprintf("jobs/%d/runs/%d/custom-out/result.json", job.ID, runID)
+	customKey := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "custom-out/result.json"
 
 	_, err = database.Exec(`
 		INSERT INTO attempt_publication_artifacts
@@ -2512,7 +2525,7 @@ func TestDeliverArtifactToken_LiveJob_DoesNotPoisonCacheWithStaleBytes(t *testin
 	runID := *job.LatestRunID
 
 	const relPath = "checkpoint.pt"
-	customKey := fmt.Sprintf("jobs/%d/runs/%d/custom-out/checkpoint.pt", job.ID, runID)
+	customKey := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "custom-out/checkpoint.pt"
 
 	_, err = database.Exec(`
 		INSERT INTO attempt_publication_artifacts
@@ -2637,7 +2650,7 @@ func TestDeliverArtifactToken_UserEditDoesNotCorruptCache(t *testing.T) {
 	runID := *job.LatestRunID
 
 	const relPath = "model.bin"
-	customKey := fmt.Sprintf("jobs/%d/runs/%d/custom-out/model.bin", job.ID, runID)
+	customKey := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "custom-out/model.bin"
 	_, err = database.Exec(`
 		INSERT INTO attempt_publication_artifacts
 			(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
@@ -2721,7 +2734,7 @@ func TestDeliverArtifactToken_CatOver100MB_StreamsDirectly(t *testing.T) {
 	runID := *job.LatestRunID
 
 	const relPath = "large.bin"
-	customKey := fmt.Sprintf("jobs/%d/runs/%d/custom-out/large.bin", job.ID, runID)
+	customKey := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "custom-out/large.bin"
 	_, err = database.Exec(`
 		INSERT INTO attempt_publication_artifacts
 			(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
@@ -2781,6 +2794,346 @@ func TestDeliverArtifactToken_CatOver100MB_StreamsDirectly(t *testing.T) {
 	}
 	if string(survivedData) != "pre-existing-cache" {
 		t.Fatalf("pre-existing cache was altered: %q", string(survivedData))
+	}
+}
+
+// setupCompletedCloudJobAttempt records a terminal cloud job with one
+// completed attempt in a private local artifact store, and returns the job
+// row and that attempt's id (the run id R2 keys use).
+func setupCompletedCloudJobAttempt(t *testing.T, database *sql.DB) (*db.Job, int64) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	attemptID, err := db.CreateAttempt(database, jobID, "vastai:12345", &instanceID, db.StatusCompleted)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	return job, attemptID
+}
+
+// The fast path consumes attempt_publication_artifacts.payload_key under the
+// same guards as the producer-need consumer: only a ready row whose key lies
+// under the producing attempt's prefixes is used; anything else falls
+// through to normal resolution (wb168).
+func TestDirectCloudArtifactForToken_UsesOnlyReadyAttemptOwnedPublicationRows(t *testing.T) {
+	const relPath = "results/metrics.json"
+	cases := []struct {
+		name   string
+		state  string
+		key    func(jobID, runID int64) string
+		wantOK bool
+	}{
+		{
+			name:  "ready owned row",
+			state: db.PublicationStateReady,
+			key: func(jobID, runID int64) string {
+				return r2keys.JobAttemptOutputsPrefix(jobID, runID) + "custom/metrics.json"
+			},
+			wantOK: true,
+		},
+		{
+			name:  "pending owned row",
+			state: db.PublicationStatePending,
+			key: func(jobID, runID int64) string {
+				return r2keys.JobAttemptOutputsPrefix(jobID, runID) + "custom/metrics.json"
+			},
+		},
+		{
+			name:  "ready row keyed under another job",
+			state: db.PublicationStateReady,
+			key: func(jobID, runID int64) string {
+				return r2keys.JobAttemptOutputsPrefix(jobID+100, runID) + "custom/metrics.json"
+			},
+		},
+		{
+			name:  "ready row keyed outside the attempt's output prefixes",
+			state: db.PublicationStateReady,
+			key: func(jobID, runID int64) string {
+				return fmt.Sprintf("jobs/%d/runs/%d/custom/metrics.json", jobID, runID)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db.SetupTestDB(t)
+			t.Setenv("HOME", t.TempDir())
+			job, attemptID := setupCompletedCloudJobAttempt(t, database)
+			key := tc.key(job.ID, attemptID)
+			if _, err := database.Exec(`
+				INSERT INTO attempt_publication_artifacts
+					(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
+				VALUES (?, ?, ?, ?, ?, ?, '', 1)`,
+				attemptID, "metrics", relPath, tc.state, time.Now().Unix(), key); err != nil {
+				t.Fatalf("insert attempt_publication_artifacts: %v", err)
+			}
+			payload := []byte(`{"loss":0.1}`)
+			store := &fakeCloudArtifactStore{objects: map[string][]byte{key: payload}}
+
+			got, ok := directCloudArtifactForToken(database, store, job, "metrics")
+			if ok != tc.wantOK {
+				t.Fatalf("fast path used = %v, want %v (row %+v)", ok, tc.wantOK, got)
+			}
+			if !ok {
+				return
+			}
+			if got.cloudFile.R2Key != key {
+				t.Fatalf("R2Key = %q, want %q", got.cloudFile.R2Key, key)
+			}
+			if !got.sizeKnown || got.SizeBytes != int64(len(payload)) {
+				t.Fatalf("size = %d (known %v), want probed size %d", got.SizeBytes, got.sizeKnown, len(payload))
+			}
+		})
+	}
+}
+
+// The sync fallback candidate outputs/<path> is derived from the raw
+// declaration: an absolute or escaping declaration must not probe
+// outputs/<basename> ahead of its artifact-files backing, while a
+// workdir-relative declaration outside the output dirs still finds its
+// captured outputs/ copy (wb168).
+func TestSyncCloudJobArtifactsWithStore_OutputsFallbackOnlyForWorkdirRelativeDeclarations(t *testing.T) {
+	cases := []struct {
+		name     string
+		declared string
+		objects  func(outputs, files string) map[string][]byte
+		want     string
+	}{
+		{
+			name:     "absolute declaration uses artifact-files backing",
+			declared: "/tmp/results.json",
+			objects: func(outputs, files string) map[string][]byte {
+				return map[string][]byte{
+					outputs + "results.json": []byte("unrelated workdir output"),
+					files + "results.json":   []byte("declared artifact"),
+				}
+			},
+			want: "declared artifact",
+		},
+		{
+			name:     "escaping declaration uses artifact-files backing",
+			declared: "../shared/results.json",
+			objects: func(outputs, files string) map[string][]byte {
+				return map[string][]byte{
+					outputs + "results.json": []byte("unrelated workdir output"),
+					files + "results.json":   []byte("declared artifact"),
+				}
+			},
+			want: "declared artifact",
+		},
+		{
+			name:     "relative declaration finds captured outputs copy",
+			declared: ".agent-execution/results/results.json",
+			objects: func(outputs, _ string) map[string][]byte {
+				return map[string][]byte{
+					outputs + ".agent-execution/results/results.json": []byte("captured output"),
+				}
+			},
+			want: "captured output",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db.SetupTestDB(t)
+			t.Setenv("HOME", t.TempDir())
+			job, runID := setupCompletedCloudJobAttempt(t, database)
+			objects := tc.objects(r2keys.JobAttemptOutputsPrefix(job.ID, runID), r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID))
+			objects[r2keys.JobAttemptArtifactManifest(job.ID, runID)] = []byte(`{"artifacts":[{"name":"results","path":"` + tc.declared + `"}]}`)
+			store := &fakeCloudArtifactStore{objects: objects}
+
+			if _, err := syncCloudJobArtifactsWithStore(database, store, job); err != nil {
+				t.Fatalf("syncCloudJobArtifactsWithStore: %v", err)
+			}
+			entry, err := db.FindArtifactByNameOrPath(database, job.ID, "results")
+			if err != nil {
+				t.Fatalf("FindArtifactByNameOrPath: %v", err)
+			}
+			localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+			if err != nil {
+				t.Fatalf("LocalPathFromStored: %v", err)
+			}
+			data, err := os.ReadFile(localPath)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if string(data) != tc.want {
+				t.Fatalf("synced content = %q, want %q", data, tc.want)
+			}
+		})
+	}
+}
+
+// cacheDirProbeWriter records, at the first byte written to stdout, whether
+// any file already exists under the job's cache directory — i.e. whether
+// delivery buffered the object to disk before streaming it.
+type cacheDirProbeWriter struct {
+	dir      string
+	buf      bytes.Buffer
+	probed   bool
+	buffered []string
+}
+
+func (w *cacheDirProbeWriter) Write(p []byte) (int, error) {
+	if !w.probed {
+		w.probed = true
+		_ = filepath.WalkDir(w.dir, func(path string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				w.buffered = append(w.buffered, path)
+			}
+			return nil
+		})
+	}
+	return w.buf.Write(p)
+}
+
+// `weft artifact cat` buffers through the write-through cache only when the
+// object is known to fit under the threshold. An unknown size (here: the
+// fast path's HEAD probe fails) and a known size above the threshold both
+// stream straight to stdout without creating a cache buffer or row (wb168).
+func TestDeliverCloudArtifactAndCache_CatStreamsUnknownOrOversizedObjectsWithoutBuffering(t *testing.T) {
+	cases := []struct {
+		name string
+		art  func(key string, runID int64, payload []byte) (resolvedArtifact, *fakeCloudArtifactStore)
+	}{
+		{
+			name: "unknown size from fast path",
+		},
+		{
+			name: "known size above threshold",
+			art: func(key string, runID int64, payload []byte) (resolvedArtifact, *fakeCloudArtifactStore) {
+				const size = maxWriteThroughCacheSizeBytes + 1
+				return resolvedArtifact{
+					Name: "large", DisplayPath: "large.bin", RelPath: "large.bin",
+					SizeBytes: size, sizeKnown: true, Source: artifactSourceCloud, RunID: &runID,
+					cloudFile: &runner.OutputFile{RelPath: "large.bin", R2Key: key, SizeBytes: size},
+				}, &fakeCloudArtifactStore{objects: map[string][]byte{key: payload}}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db.SetupTestDB(t)
+			t.Setenv("HOME", t.TempDir())
+			job, runID := setupCompletedCloudJobAttempt(t, database)
+			key := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "custom/large.bin"
+			payload := []byte("large-object-bytes")
+
+			var art resolvedArtifact
+			var store *fakeCloudArtifactStore
+			if tc.art != nil {
+				art, store = tc.art(key, runID, payload)
+			} else {
+				if _, err := database.Exec(`
+					INSERT INTO attempt_publication_artifacts
+						(attempt_id, name, path, state, ready_at, payload_key, detail, sequence)
+					VALUES (?, 'large', 'large.bin', 'ready', ?, ?, '', 1)`,
+					runID, time.Now().Unix(), key); err != nil {
+					t.Fatalf("insert attempt_publication_artifacts: %v", err)
+				}
+				store = &fakeCloudArtifactStore{
+					objects:       map[string][]byte{key: payload},
+					objectSizeErr: map[string]error{key: errors.New("head timed out")},
+				}
+				var ok bool
+				art, ok = directCloudArtifactForToken(database, store, job, "large")
+				if !ok {
+					t.Fatal("ready owned publication row with a failed HEAD probe must still resolve")
+				}
+			}
+
+			localRoot, err := artifacts.LocalArtifactsDir()
+			if err != nil {
+				t.Fatalf("LocalArtifactsDir: %v", err)
+			}
+			out := &cacheDirProbeWriter{dir: filepath.Join(localRoot, strconv.FormatInt(job.ID, 10))}
+			cmd := &cobra.Command{}
+			cmd.SetOut(out)
+			if err := deliverCloudArtifactAndCache(cmd, database, store, job, art, "-"); err != nil {
+				t.Fatalf("deliverCloudArtifactAndCache: %v", err)
+			}
+			if out.buf.String() != string(payload) {
+				t.Fatalf("stdout = %q, want %q", out.buf.String(), payload)
+			}
+			if len(out.buffered) > 0 {
+				t.Fatalf("object was buffered to the cache before streaming: %v", out.buffered)
+			}
+			rows, err := db.ListArtifactsByJob(database, job.ID)
+			if err != nil {
+				t.Fatalf("ListArtifactsByJob: %v", err)
+			}
+			if len(rows) != 0 {
+				t.Fatalf("streamed object was recorded in the cache: %+v", rows)
+			}
+		})
+	}
+}
+
+// A write-through cache fill for a path sync already recorded under its
+// manifest name updates that row: one stored file, one row, current size and
+// checksum (wb168).
+func TestDeliverCloudArtifactAndCache_RefreshReusesSyncedRowForStoredFile(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+	job, runID := setupCompletedCloudJobAttempt(t, database)
+	const relPath = "output/model.bin"
+
+	localRoot, err := artifacts.LocalArtifactsDir()
+	if err != nil {
+		t.Fatalf("LocalArtifactsDir: %v", err)
+	}
+	storedPath := artifacts.LocalStoredPath(job.ID, relPath)
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(localRoot, storedPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localRoot, storedPath), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertArtifact(database, db.Artifact{
+		JobID: job.ID, JobRunID: &runID, Name: "model", Path: relPath,
+		StoredPath: storedPath, SizeBytes: 3, SHA256: "old-sha",
+	}); err != nil {
+		t.Fatalf("UpsertArtifact: %v", err)
+	}
+
+	key := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + relPath
+	refreshed := []byte("refreshed model weights")
+	store := &fakeCloudArtifactStore{objects: map[string][]byte{key: refreshed}}
+	// A listing-derived cloud row carries no manifest name.
+	art := resolvedArtifact{
+		DisplayPath: relPath, RelPath: relPath, SizeBytes: int64(len(refreshed)), sizeKnown: true,
+		Source: artifactSourceCloud, RunID: &runID,
+		cloudFile: &runner.OutputFile{RelPath: relPath, R2Key: key, SizeBytes: int64(len(refreshed))},
+	}
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	if err := deliverCloudArtifactAndCache(cmd, database, store, job, art, filepath.Join(t.TempDir(), "model.bin")); err != nil {
+		t.Fatalf("deliverCloudArtifactAndCache: %v", err)
+	}
+
+	rows, err := db.ListArtifactsByJob(database, job.ID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByJob: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows for one stored file, want 1: %+v", len(rows), rows)
+	}
+	row := rows[0]
+	wantSHA := fmt.Sprintf("%x", sha256.Sum256(refreshed))
+	if row.Name != "model" || row.SizeBytes != int64(len(refreshed)) || row.SHA256 != wantSHA {
+		t.Fatalf("row = {Name:%q Size:%d SHA:%q}, want {model %d %s}", row.Name, row.SizeBytes, row.SHA256, len(refreshed), wantSHA)
 	}
 }
 

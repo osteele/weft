@@ -197,6 +197,27 @@ func LocalRelativePath(input string) string {
 	return filepath.FromSlash(cleaned)
 }
 
+// DeclaredWorkdirRelPath returns the cleaned slash-separated path of a
+// declared artifact that is relative to the job's working directory. It
+// decides from the raw declaration, before LocalRelativePath's basename
+// collapse: absolute, "~"-prefixed, backslash-containing, and escaping
+// ("..") declarations report false. These are the forms
+// r2resolve.ConventionOutputRelPath rejects; the uploader can map such a
+// declaration only by resolving it against the remote working directory,
+// and records the resulting key in its publication report.
+func DeclaredWorkdirRelPath(artifactPath string) (string, bool) {
+	artifactPath = strings.TrimSpace(artifactPath)
+	if artifactPath == "" || strings.Contains(artifactPath, `\`) || strings.HasPrefix(artifactPath, "~") ||
+		filepath.IsAbs(artifactPath) || path.IsAbs(artifactPath) {
+		return "", false
+	}
+	rel := path.Clean(artifactPath)
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+	return rel, true
+}
+
 // LocalStoredPath returns the stored path relative to the local artifacts root.
 func LocalStoredPath(jobID int64, artifactPath string) string {
 	return filepath.Join(fmt.Sprintf("%d", jobID), LocalRelativePath(artifactPath))

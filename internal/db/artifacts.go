@@ -91,6 +91,31 @@ func UpsertArtifact(db *sql.DB, art Artifact) error {
 	}
 }
 
+// FindArtifactByStoredPath returns the artifact row that already describes
+// one stored file for a job attempt, scoped the way UpsertArtifact scopes
+// rows (a nil or non-positive run id means the job's latest run). A named
+// row is preferred over an unnamed one. It returns sql.ErrNoRows when no
+// row describes storedPath.
+func FindArtifactByStoredPath(db *sql.DB, jobID int64, runID *int64, storedPath string) (*Artifact, error) {
+	if runID != nil && *runID <= 0 {
+		runID = nil
+	}
+	if runID == nil {
+		latest, err := latestRunIDForJob(db, jobID)
+		if err != nil {
+			return nil, err
+		}
+		runID = latest
+	}
+	const cols = `SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at FROM artifacts`
+	if runID != nil {
+		return scanOneArtifact(db, cols+` WHERE attempt_id = ? AND stored_path = ?
+			ORDER BY (name = '') ASC, id ASC LIMIT 1`, *runID, storedPath)
+	}
+	return scanOneArtifact(db, cols+` WHERE job_id = ? AND attempt_id IS NULL AND stored_path = ?
+		ORDER BY (name = '') ASC, id ASC LIMIT 1`, jobID, storedPath)
+}
+
 // ListArtifactsByJob returns cached artifacts for a job.
 func ListArtifactsByJob(db *sql.DB, jobID int64) ([]Artifact, error) {
 	if runID, err := latestRunIDForJob(db, jobID); err == nil && runID != nil {
