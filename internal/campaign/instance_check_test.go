@@ -2135,13 +2135,16 @@ func TestCheckInstance_IntendedStatusStopped(t *testing.T) {
 		lastProviderStatus: make(map[int64]string),
 		deadConfirmTime:    -1, // disable hysteresis
 	}
+	ci := &db.Launch{
+		ID:                 1,
+		Status:             db.LaunchStatusRunning,
+		Provider:           "vastai",
+		ProviderInstanceID: "test-123",
+		MachineID:          "49863",
+	}
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.Launch{
-			ID:                 1,
-			Status:             db.LaunchStatusRunning,
-			ProviderInstanceID: "test-123",
-		},
-		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusCreated, IntendedStatus: cloud.ProviderStatusStopped},
+		CI:           ci,
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusCreated, IntendedStatus: cloud.ProviderStatusStopped, StatusMsg: "host failure"},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionProviderDead {
@@ -2149,6 +2152,17 @@ func TestCheckInstance_IntendedStatusStopped(t *testing.T) {
 	}
 	if !action.ResetJobs {
 		t.Error("expected ResetJobs to be true for dead instance")
+	}
+	// The termination detail and the oplog event must say why "created"
+	// counted as terminal.
+	if !strings.Contains(action.StallMessage, `provider status=created intended=stopped msg="host failure"`) {
+		t.Errorf("StallMessage missing provider intended status/message: %s", action.StallMessage)
+	}
+	event := formatActionDetail(ci, action)
+	for _, want := range []string{"action=provider_dead", "provider=vastai", "provider_instance_id=test-123", "machine_id=49863", `intended="stopped"`, `status_msg="host failure"`} {
+		if !strings.Contains(event, want) {
+			t.Errorf("oplog detail missing %q\nfull: %s", want, event)
+		}
 	}
 }
 
@@ -2887,7 +2901,12 @@ func TestCheckInstance_PauseTolerant_StaleOffline_Preempted(t *testing.T) {
 }
 
 func TestFormatActionDetail_IncludesProviderSnapshot(t *testing.T) {
-	got := formatActionDetail(42, InstanceAction{
+	got := formatActionDetail(&db.Launch{
+		ID:                 42,
+		Provider:           "vastai",
+		ProviderInstanceID: "31415",
+		MachineID:          "49863",
+	}, InstanceAction{
 		Kind:                           ActionEmptyStatusTimeout,
 		TerminationReason:              db.TerminationReasonInfraFailure,
 		StallMessage:                   "stuck in offline",
@@ -2898,6 +2917,9 @@ func TestFormatActionDetail_IncludesProviderSnapshot(t *testing.T) {
 	for _, want := range []string{
 		"launch_id=42",
 		"reason=" + db.TerminationReasonInfraFailure,
+		"provider=vastai",
+		"provider_instance_id=31415",
+		"machine_id=49863",
 		`status="offline"`,
 		`intended="running"`,
 		`status_msg="host unreachable"`,
@@ -2910,8 +2932,9 @@ func TestFormatActionDetail_IncludesProviderSnapshot(t *testing.T) {
 }
 
 func TestFormatActionDetail_OmitsEmptyFields(t *testing.T) {
-	got := formatActionDetail(7, InstanceAction{Kind: ActionPause})
-	if strings.Contains(got, "status=") || strings.Contains(got, "intended=") || strings.Contains(got, "status_msg=") {
+	got := formatActionDetail(&db.Launch{ID: 7}, InstanceAction{Kind: ActionPause})
+	if strings.Contains(got, "status=") || strings.Contains(got, "intended=") || strings.Contains(got, "status_msg=") ||
+		strings.Contains(got, "provider=") || strings.Contains(got, "provider_instance_id=") || strings.Contains(got, "machine_id=") {
 		t.Errorf("formatActionDetail leaked empty provider fields: %s", got)
 	}
 	if !strings.Contains(got, "launch_id=7") {
@@ -2964,6 +2987,67 @@ func TestBuildProviderDeadDetail_R2Refined(t *testing.T) {
 	got := buildProviderDeadDetail(nil, nil, db.TerminationReasonUnknown, db.TerminationReasonDiskFull, now)
 	if !strings.Contains(got, "R2 marker refined reason unknown→disk_full") {
 		t.Errorf("expected R2 refinement note, got: %s", got)
+	}
+}
+
+func TestBuildProviderDeadDetail_ProviderIntendedStatusAndMessage(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	launched := now.Add(-(14*time.Minute + 10*time.Second)).Unix()
+	ci := &db.Launch{ID: 7912, LaunchedAt: &launched}
+	tests := []struct {
+		name    string
+		inst    *cloud.Instance
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "intended status and message present",
+			inst: &cloud.Instance{Status: cloud.ProviderStatusCreated, IntendedStatus: cloud.ProviderStatusStopped, StatusMsg: "Error response from daemon: manifest unknown"},
+			want: []string{
+				`provider status=created intended=stopped msg="Error response from daemon: manifest unknown"`,
+				"launched 14m10s ago",
+			},
+		},
+		{
+			name:    "neither present",
+			inst:    &cloud.Instance{Status: cloud.ProviderStatusCreated},
+			want:    []string{"provider status=created; launched 14m10s ago"},
+			notWant: []string{"intended=", "msg="},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildProviderDeadDetail(ci, tc.inst, db.TerminationReasonProviderFailure, db.TerminationReasonProviderFailure, now)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("buildProviderDeadDetail missing %q\nfull: %s", want, got)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(got, notWant) {
+					t.Errorf("buildProviderDeadDetail contains %q\nfull: %s", notWant, got)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildProviderDeadDetail_TruncatesLongStatusMessage(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	tail := "TAIL-SHOULD-BE-CUT"
+	msg := strings.Repeat("x", 5000) + tail
+	inst := &cloud.Instance{Status: cloud.ProviderStatusCreated, IntendedStatus: cloud.ProviderStatusStopped, StatusMsg: msg}
+	got := buildProviderDeadDetail(nil, inst, db.TerminationReasonUnknown, db.TerminationReasonUnknown, now)
+	if strings.Contains(got, tail) {
+		t.Errorf("long status message was not truncated: %d bytes", len(got))
+	}
+	if len(got) > 1000 {
+		t.Errorf("detail length %d exceeds bound; status message not truncated", len(got))
+	}
+	for _, want := range []string{`msg="xxxx`, "intended=stopped", "agent never reported ready", "no R2 disk-failure marker"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("truncation dropped %q\nfull: %s", want, got)
+		}
 	}
 }
 

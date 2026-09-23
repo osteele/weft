@@ -1219,10 +1219,21 @@ func buildProviderDeadDetail(ci *db.Launch, inst *cloud.Instance, baseReason, fi
 	parts := []string{"provider dead with no completion or intent marker"}
 	if inst == nil {
 		parts = append(parts, "provider returned no instance")
-	} else if inst.Status == "" {
-		parts = append(parts, "provider status empty")
 	} else {
-		parts = append(parts, fmt.Sprintf("provider status=%s", inst.Status))
+		// Intended status and status message say why the provider counts as
+		// terminal (e.g. Vast created+intended=stopped after an image-load or
+		// host failure); without them the post-mortem cannot tell (wb171).
+		observed := "provider status empty"
+		if inst.Status != "" {
+			observed = fmt.Sprintf("provider status=%s", inst.Status)
+		}
+		if inst.IntendedStatus != "" {
+			observed += fmt.Sprintf(" intended=%s", inst.IntendedStatus)
+		}
+		if inst.StatusMsg != "" {
+			observed += fmt.Sprintf(" msg=%q", truncateProviderStatusMsg(inst.StatusMsg))
+		}
+		parts = append(parts, observed)
 	}
 	if ci != nil && ci.LaunchedAt != nil {
 		parts = append(parts, fmt.Sprintf("launched %s ago", now.Sub(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second)))
@@ -1238,6 +1249,19 @@ func buildProviderDeadDetail(ci *db.Launch, inst *cloud.Instance, baseReason, fi
 		parts = append(parts, "no R2 disk-failure marker")
 	}
 	return strings.Join(parts, "; ")
+}
+
+// maxProviderStatusMsgRunes bounds the provider status message carried in
+// launches.termination_detail; provider messages can embed whole image-pull
+// or startup errors.
+const maxProviderStatusMsgRunes = 200
+
+func truncateProviderStatusMsg(msg string) string {
+	runes := []rune(msg)
+	if len(runes) <= maxProviderStatusMsgRunes {
+		return msg
+	}
+	return string(runes[:maxProviderStatusMsgRunes]) + "…"
 }
 
 // ExecuteAction performs the side effects described by an InstanceAction: destroying
@@ -1260,7 +1284,7 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 			slog.Warn("failed to update instance status", "component", "reconcile", "instance", ci.ID, "status", newStatus, "error", err)
 			return false, false
 		}
-		oplog.Log(op, oplog.WithDetail(formatActionDetail(ci.ID, action)))
+		oplog.Log(op, oplog.WithDetail(formatActionDetail(ci, action)))
 		if eventKind := actionEventKind(action.Kind); eventKind != "" {
 			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 				EventKind: eventKind,
@@ -1334,7 +1358,7 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 		if action.TerminalStatus == db.LaunchStatusFailed {
 			op = oplog.OpLaunchLaunchFailed
 		}
-		oplog.Log(op, oplog.WithDetail(formatActionDetail(ci.ID, action)))
+		oplog.Log(op, oplog.WithDetail(formatActionDetail(ci, action)))
 		if eventKind := actionEventKind(action.Kind); eventKind != "" {
 			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 				EventKind: eventKind,
@@ -1394,13 +1418,22 @@ func (k InstanceActionKind) String() string {
 }
 
 // formatActionDetail formats the per-action oplog detail string. Includes
-// the provider-status snapshot captured by CheckInstance so post-mortems
-// can identify status-classification bugs without re-fetching from the
-// provider. Empty fields are omitted.
-func formatActionDetail(launchID int64, action InstanceAction) string {
-	parts := []string{fmt.Sprintf("launch_id=%d", launchID), fmt.Sprintf("action=%s", action.Kind)}
+// the launch's provider identity and the provider-status snapshot captured
+// by CheckInstance so post-mortems can identify status-classification bugs
+// without re-fetching from the provider. Empty fields are omitted.
+func formatActionDetail(ci *db.Launch, action InstanceAction) string {
+	parts := []string{fmt.Sprintf("launch_id=%d", ci.ID), fmt.Sprintf("action=%s", action.Kind)}
 	if action.TerminationReason != "" {
 		parts = append(parts, fmt.Sprintf("reason=%s", action.TerminationReason))
+	}
+	if ci.Provider != "" {
+		parts = append(parts, fmt.Sprintf("provider=%s", ci.Provider))
+	}
+	if providerID := ci.EffectiveProviderID(); providerID != "" {
+		parts = append(parts, fmt.Sprintf("provider_instance_id=%s", providerID))
+	}
+	if ci.MachineID != "" {
+		parts = append(parts, fmt.Sprintf("machine_id=%s", ci.MachineID))
 	}
 	if action.ObservedProviderStatus != "" {
 		parts = append(parts, fmt.Sprintf("status=%q", action.ObservedProviderStatus))
