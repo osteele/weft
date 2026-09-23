@@ -324,13 +324,35 @@ func (e ScriptTorchEnv) CUDAVersion() string {
 	return ""
 }
 
-// ScanScriptTorchEnvs returns one entry per referenced PEP 723 script that
-// declares a torch requirement, in command order.
-func ScanScriptTorchEnvs(dir, command string) []ScriptTorchEnv {
-	var out []ScriptTorchEnv
-	for _, script := range ExtractPythonScriptsInDir(dir, command) {
+// CommandTorchEnvs describes the environments that import torch for a shell
+// command.
+type CommandTorchEnvs struct {
+	// Scripts has one entry per PEP 723 script declaring torch, in command
+	// order. It is the union of every script the command references by token
+	// (ExtractPythonScriptsInDir) and every script a parsed direct
+	// `uv run X.py` step runs, so neither a misparse nor a reference the token
+	// scan misses (such as `(uv run a.py)`) drops a script's constraints.
+	Scripts []ScriptTorchEnv
+	// ProjectPython reports that some step may run Python in the project
+	// environment, which then imports the project lock's torch. True when the
+	// command does not parse.
+	ProjectPython bool
+}
+
+// ScanCommandTorchEnvs returns the torch environments of command's scripts
+// and whether the project environment also runs Python.
+func ScanCommandTorchEnvs(dir, command string) CommandTorchEnvs {
+	parsed, projectPython := scanShellPythonSteps(dir, command)
+	out := CommandTorchEnvs{ProjectPython: projectPython}
+	seen := map[string]bool{}
+	for _, script := range append(ExtractPythonScriptsInDir(dir, command), parsed...) {
+		key := filepath.Clean(script)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		if env := scriptTorchEnv(dir, command, script); env != nil {
-			out = append(out, *env)
+			out.Scripts = append(out.Scripts, *env)
 		}
 	}
 	return out

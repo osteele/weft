@@ -19,24 +19,26 @@ metadata (`gpu`, `gpu-mem`, `gpu-arch-max`, `cuda-driver-min`, `min-driver`,
 **Inferred from the torch pin** (`dataloc.ScanTorchPin` reads `uv.lock`,
 falling back to `pyproject.toml`). A PEP 723 script that declares its own
 torch requirement resolves torch in its own environment
-(`dataloc.ScanScriptTorchEnvs`), pinned by an exact requirement or by the
+(`dataloc.ScanCommandTorchEnvs`), pinned by an exact requirement or by the
 highest release line an upper bound admits after wildcard exclusions
-(`torch>=2.2,<2.8,!=2.7.*` -> 2.6). Each such environment contributes to the
-CUDA/driver floor, max-merged across the scripts a command references; a
-range with no determinable release line takes the newest-torch CUDA floor
-(`dataloc.OpenEndedTorchCUDAFloor`). `dataloc.ScanCommandPythonEnvs` splits the
-command into steps at unquoted shell operators (quotes and escapes are
-honoured, so `echo 'a; b'` is one step, while the body of a double-quoted
-`"$(...)"` or backtick substitution is scanned as further steps) and classifies
-each step: a direct `uv run script.py` of a PEP 723 script runs that
-script's environment; `uv run python ...`, `uv run <tool>`, bare `python ...`,
-and any executable not known to be non-Python run in the project environment;
-builtins and utilities such as `cd`, `echo`, `mkdir` and `export` are neutral.
-The arch cap is the most restrictive across the script environments of direct
-steps, plus the project pin's cap when any step runs in the project
-environment. When a script environment owns CUDA, a project-environment step
-also max-merges the project wheel's CUDA floor. Commands with no direct script
-step, and open script ranges, take the cap from the project pin.
+(`torch>=2.2,<2.8,!=2.7.*` -> 2.6). Every PEP 723 script the command
+references by token, or runs in a parsed direct `uv run script.py` step,
+contributes: the arch cap is the most restrictive of their caps and
+the CUDA/driver floor the max-merge of their floors; a range with no
+determinable release line contributes no cap and the newest-torch CUDA floor
+(`dataloc.OpenEndedTorchCUDAFloor`). The project torch pin joins the minimum
+cap and the floor max-merge when the same scan finds a
+step that may run project-environment Python. It parses the command as bash
+(`mvdan.cc/sh/v3/syntax`) and classifies every simple command, including those
+in command substitutions, subshells and compound statements (heredoc bodies
+are data): a direct `uv run script.py` of a PEP 723 script runs that script's
+environment; `uv run python ...`, `uv run <tool>`, bare `python ...`, a
+command name that is not a static word, and any executable not known to be
+non-Python run in the project environment; builtins and utilities such as
+`cd`, `echo`, `mkdir` and `export` are neutral. A command that fails to parse
+counts as running project Python. Because scripts count wherever they are
+referenced, a misclassified step can only over-restrict. When no script
+determines a release, the cap comes from the project pin.
 
 - *Arch cap* (`max_compute_cap`): the highest CUDA compute capability the
   pinned wheel ships kernels for (`placement.TorchMaxComputeCap`). Persisted

@@ -3,6 +3,8 @@ package dataloc
 import (
 	"path/filepath"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // DirectUVRunPEP723Script returns the script path from a simple direct
@@ -14,171 +16,6 @@ func DirectUVRunPEP723Script(dir, command string) string {
 		return ""
 	}
 	return script
-}
-
-// shellSteps splits command into simple-command steps at unquoted list,
-// pipeline, background and grouping operators (&&, ||, |, ;, &, newline,
-// parentheses, backticks) and returns each step's words with quoting removed.
-// Single quotes are literal; double quotes honour backslash escapes of $, `,
-// ", \ and newline; an unquoted backslash escapes the next character, and
-// backslash-newline continues the line. An unquoted # starting a word begins a
-// comment. `&` in a redirection (2>&1, &>) is not an operator. Command
-// substitutions inside double quotes ("$(...)", "`...`") execute, so their
-// bodies are split recursively and their steps included; the substitution
-// text stays in the enclosing word. Empty steps are omitted.
-func shellSteps(command string) [][]string {
-	var steps [][]string
-	var words []string
-	var word strings.Builder
-	inWord := false
-	endWord := func() {
-		if inWord {
-			words = append(words, word.String())
-			word.Reset()
-			inWord = false
-		}
-	}
-	endStep := func() {
-		endWord()
-		if len(words) > 0 {
-			steps = append(steps, words)
-			words = nil
-		}
-	}
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		switch {
-		case c == '\\':
-			if i+1 < len(command) {
-				i++
-				if command[i] != '\n' {
-					word.WriteByte(command[i])
-					inWord = true
-				}
-			}
-		case c == '\'':
-			inWord = true
-			end := strings.IndexByte(command[i+1:], '\'')
-			if end < 0 {
-				end = len(command) - i - 1
-			}
-			word.WriteString(command[i+1 : i+1+end])
-			i += end + 1
-		case c == '"':
-			inWord = true
-			for i++; i < len(command) && command[i] != '"'; i++ {
-				if command[i] == '\\' && i+1 < len(command) && strings.IndexByte("$`\"\\\n", command[i+1]) >= 0 {
-					i++
-					if command[i] == '\n' {
-						continue
-					}
-				} else if body, end, ok := quotedSubstitution(command, i); ok {
-					steps = append(steps, shellSteps(body)...)
-					word.WriteString(command[i:end])
-					i = end - 1
-					continue
-				}
-				word.WriteByte(command[i])
-			}
-		case c == ' ' || c == '\t':
-			endWord()
-		case c == '#' && !inWord:
-			for i+1 < len(command) && command[i+1] != '\n' {
-				i++
-			}
-		case c == '&' && isRedirectionAmpersand(command, i):
-			word.WriteByte(c)
-			inWord = true
-		case strings.IndexByte(";&|\n()`", c) >= 0:
-			endStep()
-		default:
-			word.WriteByte(c)
-			inWord = true
-		}
-	}
-	endStep()
-	return steps
-}
-
-// quotedSubstitution recognizes a command substitution starting at command[i]
-// inside double quotes: `$(` through its matching `)`, or a backtick through
-// the next unescaped backtick. It returns the body and the index just past the
-// substitution; an unterminated substitution extends to the end of command.
-// Arithmetic expansion `$((...))` runs no command and is not recognized.
-func quotedSubstitution(command string, i int) (body string, end int, ok bool) {
-	switch {
-	case command[i] == '`':
-		for j := i + 1; j < len(command); j++ {
-			switch command[j] {
-			case '\\':
-				j++
-			case '`':
-				return command[i+1 : j], j + 1, true
-			}
-		}
-		return command[i+1:], len(command), true
-	case command[i] == '$' && strings.HasPrefix(command[i+1:], "(") && !strings.HasPrefix(command[i+1:], "(("):
-		start := i + 2
-		if j := matchingParen(command, start); j < len(command) {
-			return command[start:j], j + 1, true
-		}
-		return command[start:], len(command), true
-	}
-	return "", 0, false
-}
-
-// matchingParen returns the index of the `)` closing a parenthesis opened just
-// before command[start], skipping quoted text and escapes, or len(command).
-func matchingParen(command string, start int) int {
-	depth := 1
-	for j := start; j < len(command); j++ {
-		switch command[j] {
-		case '\\':
-			j++
-		case '\'':
-			if k := strings.IndexByte(command[j+1:], '\''); k >= 0 {
-				j += k + 1
-			} else {
-				return len(command)
-			}
-		case '"':
-			for j++; j < len(command) && command[j] != '"'; j++ {
-				if command[j] == '\\' {
-					j++
-				}
-			}
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return j
-			}
-		}
-	}
-	return len(command)
-}
-
-// isRedirectionAmpersand reports whether the unquoted & at command[i] belongs
-// to a redirection such as 2>&1, <&3 or &>log rather than being an operator.
-func isRedirectionAmpersand(command string, i int) bool {
-	if i > 0 && (command[i-1] == '>' || command[i-1] == '<') {
-		return true
-	}
-	return i+1 < len(command) && command[i+1] == '>'
-}
-
-// CommandPythonEnvs classifies the Python environments a shell command's
-// steps run in.
-type CommandPythonEnvs struct {
-	// Scripts are the PEP 723 scripts run in their own script environments
-	// by direct `uv run ... script.py` steps, in command order.
-	Scripts []string
-	// ProjectEnv reports that some step may run Python in the project
-	// environment: `uv run python ...`, `uv run` of a tool or of a script
-	// without PEP 723 metadata, bare `python ...`, or any executable that is
-	// not a known non-Python command.
-	ProjectEnv bool
 }
 
 // neutralCommands are shell builtins and utilities that never import the
@@ -196,38 +33,123 @@ var neutralCommands = map[string]bool{
 // commandWrappers run the rest of the step as the command.
 var commandWrappers = map[string]bool{"env": true, "time": true, "nohup": true, "exec": true}
 
-// ScanCommandPythonEnvs splits command into shell steps (see shellSteps) and
-// classifies each. Unrecognized executables count as project-environment
-// Python: treating a step as project Python can only add the project torch's
+// scanShellPythonSteps parses command as bash and classifies every simple
+// command, including those in command substitutions, subshells, pipelines,
+// lists and compound statements; heredoc bodies are data. It returns the PEP
+// 723 scripts run in their own environments by direct `uv run [opts] X.py`
+// steps, and whether some step may run Python in the project environment:
+// `uv run python ...`, `uv run` of a tool or of a script without PEP 723
+// metadata, bare `python ...`, or any executable that is not a known
+// non-Python command.
+//
+// A command that fails to parse, or a command or `uv run` target that is not a
+// static word, counts as project Python: that can only add the project torch's
 // constraints, never drop a script environment's.
-func ScanCommandPythonEnvs(dir, command string) CommandPythonEnvs {
-	var out CommandPythonEnvs
-	for _, words := range shellSteps(command) {
-		i := 0
-		for i < len(words) && (isShellAssignment(words[i]) || commandWrappers[words[i]]) {
-			i++
+func scanShellPythonSteps(dir, command string) (scripts []string, projectPython bool) {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil, true
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
 		}
-		if i >= len(words) {
-			continue
+		script, project := classifyShellCall(dir, command, call)
+		if script != "" {
+			scripts = append(scripts, script)
 		}
-		name := filepath.Base(words[i])
-		switch {
-		case name == "uv":
-			if i+1 >= len(words) || words[i+1] != "run" {
-				continue // uv sync, uv pip, ...: no user Python runs.
+		projectPython = projectPython || project
+		return true
+	})
+	return scripts, projectPython
+}
+
+// classifyShellCall returns the PEP 723 script a simple command runs in its
+// own environment, or whether it may run project-environment Python.
+func classifyShellCall(dir, command string, call *syntax.CallExpr) (script string, projectPython bool) {
+	words := make([]string, 0, len(call.Args))
+	for _, arg := range call.Args {
+		word, ok := literalWord(arg)
+		if !ok {
+			if len(words) == 0 {
+				return "", true // The executable is not statically known.
 			}
-			target := uvRunTarget(words[i+2:])
-			if strings.HasSuffix(target, ".py") && ScriptHasPEP723Metadata(dir, command, target) {
-				out.Scripts = append(out.Scripts, target)
-			} else {
-				out.ProjectEnv = true
+			word = "\x00" // A dynamic argument never names a known option or script.
+		}
+		words = append(words, word)
+	}
+	i := 0
+	for i < len(words) && (isShellAssignment(words[i]) || commandWrappers[words[i]]) {
+		i++
+	}
+	if i >= len(words) {
+		return "", false // Assignments only.
+	}
+	switch name := filepath.Base(words[i]); {
+	case name == "uv":
+		if i+1 >= len(words) || words[i+1] != "run" {
+			return "", false // uv sync, uv pip, ...: no user Python runs.
+		}
+		target := uvRunTarget(words[i+2:])
+		if strings.HasSuffix(target, ".py") && ScriptHasPEP723Metadata(dir, command, target) {
+			return target, false
+		}
+		return "", true
+	case neutralCommands[name]:
+		return "", false
+	default:
+		return "", true
+	}
+}
+
+// literalWord returns w's value with quoting removed when w is a static
+// string, and ok=false when it contains an expansion or substitution.
+func literalWord(w *syntax.Word) (string, bool) {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			b.WriteString(unescapeShell(p.Value, ""))
+		case *syntax.SglQuoted:
+			if p.Dollar {
+				return "", false // $'...' applies ANSI-C escapes.
 			}
-		case neutralCommands[name]:
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, qp := range p.Parts {
+				lit, ok := qp.(*syntax.Lit)
+				if !ok {
+					return "", false
+				}
+				b.WriteString(unescapeShell(lit.Value, "$`\"\\\n"))
+			}
 		default:
-			out.ProjectEnv = true
+			return "", false
 		}
 	}
-	return out
+	return b.String(), true
+}
+
+// unescapeShell removes backslash escapes from literal shell text. Outside
+// double quotes (escapable == "") a backslash escapes any character; inside
+// them it escapes only the characters in escapable. An escaped newline is a
+// line continuation and is dropped.
+func unescapeShell(s, escapable string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && (escapable == "" || strings.IndexByte(escapable, s[i+1]) >= 0) {
+			i++
+			if s[i] == '\n' {
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 func directUVRunScript(command string) string {

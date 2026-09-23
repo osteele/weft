@@ -134,6 +134,46 @@ func TestResolveJobTorchMaxComputeCapForPersistence_ScriptTorchBound(t *testing.
 			map[string]string{"second.py": torch291},
 			`echo '$(python x)' && uv run scripts/second.py`, "12.0",
 		},
+		{
+			"apostrophe in a substitution comment keeps the later script step", "2.12.1",
+			map[string]string{"exp.py": bounded},
+			"echo \"$(echo ready # don't log more\n)\" && uv run scripts/exp.py", "9.0",
+		},
+		{
+			"parenthesis in a substitution comment keeps the later script step", "2.12.1",
+			map[string]string{"exp.py": bounded},
+			"echo \"$(echo ready # (\n)\" && uv run scripts/exp.py", "9.0",
+		},
+		{
+			"syntax error includes the project env", "2.6.0",
+			map[string]string{"second.py": torch291},
+			`uv run scripts/second.py && echo 'unterminated`, "9.0",
+		},
+		{
+			"heredoc body is data, not a step", "2.6.0",
+			map[string]string{"second.py": torch291},
+			"cat <<'EOF' > run.sh\npython scripts/prep.py\nEOF\nuv run scripts/second.py", "12.0",
+		},
+		{
+			"dynamic executable counts as project env", "2.6.0",
+			map[string]string{"second.py": torch291},
+			`"$PYTHON" scripts/prep.py && uv run scripts/second.py`, "9.0",
+		},
+		{
+			"script referenced outside a direct uv run step still bounds the cap", "2.12.1",
+			map[string]string{"exp.py": bounded},
+			"uv run python scripts/exp.py", "9.0",
+		},
+		{
+			"script run in a subshell the token scan misses", "2.12.1",
+			map[string]string{"exp.py": bounded},
+			"(uv run scripts/exp.py)", "9.0",
+		},
+		{
+			"script run in a subshell after a list operator", "2.12.1",
+			map[string]string{"exp.py": bounded},
+			"true;(uv run scripts/exp.py)", "9.0",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

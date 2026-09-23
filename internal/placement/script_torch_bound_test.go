@@ -128,6 +128,34 @@ func TestScriptTorchFloorsIncludeQuotedSubstitutionSteps(t *testing.T) {
 	}
 }
 
+// Quotes and parentheses inside a comment in a command substitution are
+// comment text, and a script run in a subshell is still a script step whose
+// path the token scan misses: in each case the script keeps its sm_90 cap and
+// its torch 2.6 floor, and no project-env step is invented.
+func TestScriptTorchBoundSurvivesSubstitutionComments(t *testing.T) {
+	dir, _ := writeScriptTorchProject(t, "torch>=2.2,<2.7")
+	for _, command := range []string{
+		"echo \"$(echo ready # don't log more\n)\" && uv run scripts/exp.py",
+		"echo \"$(echo ready # (\n)\" && uv run scripts/exp.py",
+		"(uv run scripts/exp.py)",
+		"true;(uv run scripts/exp.py)",
+	} {
+		if got := ResolveJobMaxComputeCapForPersistence(dir, command); got != "9.0" {
+			t.Errorf("%q: cap = %q, want 9.0", command, got)
+		}
+		want := map[RuntimeFloorMode]string{RuntimeFloorExact: "12.4", RuntimeFloorFamily: "12.0"}
+		for mode, cuda := range want {
+			runtime, err := ResolveEffectiveRuntime(dir, command, EffectiveRuntimeOptions{FloorMode: mode})
+			if err != nil {
+				t.Fatalf("ResolveEffectiveRuntime mode %d: %v", mode, err)
+			}
+			if runtime.Floor.Req.MinCUDAVersion != cuda {
+				t.Errorf("%q mode %d: MinCUDAVersion = %q, want %s", command, mode, runtime.Floor.Req.MinCUDAVersion, cuda)
+			}
+		}
+	}
+}
+
 func TestScriptTorchOpenRangeKeepsLatestTorchFloor(t *testing.T) {
 	dir, command := writeScriptTorchProject(t, "torch>=2.2")
 

@@ -964,16 +964,16 @@ import torch
 	if !ScriptUsesTorch(dir, "uv run train.py") {
 		t.Fatal("ScriptUsesTorch = false, want true")
 	}
-	envs := ScanScriptTorchEnvs(dir, "uv run train.py")
+	envs := ScanCommandTorchEnvs(dir, "uv run train.py").Scripts
 	if len(envs) != 1 || envs[0].Pin != nil {
-		t.Fatalf("ScanScriptTorchEnvs = %+v, want one env with no determined release", envs)
+		t.Fatalf("ScanCommandTorchEnvs = %+v, want one env with no determined release", envs)
 	}
 	if got := envs[0].CUDAVersion(); got != OpenEndedTorchCUDAFloor {
 		t.Fatalf("CUDAVersion = %q, want %q", got, OpenEndedTorchCUDAFloor)
 	}
 }
 
-func TestScanScriptTorchEnvsUsesToolUV(t *testing.T) {
+func TestScanCommandTorchEnvsUsesToolUV(t *testing.T) {
 	dir := t.TempDir()
 	script := `# /// script
 # dependencies = ["torch==2.4.1"]
@@ -986,9 +986,9 @@ import torch
 		t.Fatalf("write train.py: %v", err)
 	}
 
-	envs := ScanScriptTorchEnvs(dir, "uv run train.py")
+	envs := ScanCommandTorchEnvs(dir, "uv run train.py").Scripts
 	if len(envs) != 1 || envs[0].Pin == nil {
-		t.Fatalf("ScanScriptTorchEnvs = %+v, want one pinned env", envs)
+		t.Fatalf("ScanCommandTorchEnvs = %+v, want one pinned env", envs)
 	}
 	if pin := envs[0].Pin; pin.Version != "2.4.1" || pin.CudaVariant != "cu121" {
 		t.Fatalf("pin = %+v, want version 2.4.1 cu121", pin)

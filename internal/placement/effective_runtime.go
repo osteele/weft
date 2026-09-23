@@ -152,13 +152,15 @@ func ResolveEffectiveRuntime(localDir, command string, opts EffectiveRuntimeOpti
 
 func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode, meta *dataloc.ScriptMeta) RuntimeFloor {
 	var rf RuntimeFloor
-	scriptEnvs := dataloc.ScanScriptTorchEnvs(dir, command)
+	torchEnvs := dataloc.ScanCommandTorchEnvs(dir, command)
 	scriptDeps := dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))
-	scriptOwnsCUDA := scriptOwnsCUDAEnv(meta, len(scriptEnvs) > 0, scriptDeps)
+	scriptOwnsCUDA := scriptOwnsCUDAEnv(meta, len(torchEnvs.Scripts) > 0, scriptDeps)
 
-	// Each script resolves its own environment, so every environment's torch
-	// floor is max-merged rather than taking the first script's.
-	for _, env := range scriptEnvs {
+	// Each script resolves its own environment, so every script's torch floor
+	// is max-merged, whether the command references it by token or runs it in
+	// a parsed `uv run script.py` step: a misparsed command then
+	// over-restricts rather than losing a script's floor.
+	for _, env := range torchEnvs.Scripts {
 		if mode == RuntimeFloorExact {
 			mergeScriptTorchExactFloor(&rf, env)
 		} else {
@@ -177,7 +179,7 @@ func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode, meta *datal
 			rf.ProjectTorchPinCUDA = dataloc.CUDAVariantVersion(pin.CudaVariant)
 			mergeProjectTorchFloor(&rf, mode, pin)
 		}
-	} else if dataloc.ScanCommandPythonEnvs(dir, command).ProjectEnv {
+	} else if torchEnvs.ProjectPython {
 		// A script environment owns CUDA, but another step also runs Python
 		// in the project environment and imports the project lock's torch, so
 		// that wheel's floor joins the max-merge. It is not recorded as the
