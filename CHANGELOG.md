@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Published directory dependencies**: Rental and R2-pull consumers stage
+  ready producer directories as exact child-file transfers, preserving nested
+  paths and producer-attempt boundaries.
+
 - **Structured admission rejections**: Online-only JSON receipts include stable
   refusal codes and UTF-8 diagnostics bounded to 1,024 bytes. The v1 receipt
   contract preserves its existing no-job fallback guarantee.
@@ -31,6 +35,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Artifact dependency failure isolation**: Confirmed missing or failed
+  producer artifacts fail the rental consumer with a dependency diagnosis.
+  Pending publication and storage lookup errors defer admission. These
+  rejections preserve healthy jobs and do not trip the infrastructure breaker.
 - **Daemon identity probes**: Recovery uses the caller's probe timeout and reports
   uncertain daemon identity without suggesting that a start or restart failed.
   Uncertain probes leave the daemon process and its state files untouched.

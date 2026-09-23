@@ -3,9 +3,11 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/cloudneeds"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
@@ -136,4 +138,66 @@ func isSameLiveInstance(database *sql.DB, producer *db.Job, targetInstanceID int
 		return false
 	}
 	return !launch.HasActiveTerminationIntent()
+}
+
+func confirmedCloudDependencyFailure(err error) bool {
+	return errors.Is(err, cloudneeds.ErrArtifactPublicationFailed) ||
+		errors.Is(err, cloudneeds.ErrArtifactPublicationMissing)
+}
+
+func cloudDependencyDiagnosis(job *db.Job, err error) error {
+	if confirmedCloudDependencyFailure(err) {
+		return fmt.Errorf("job %s dependency failed: %w; repair or republish the producer artifact, then restart the consumer", ids.FormatJobID(job.ID), err)
+	}
+	return fmt.Errorf("job %s dependency is not ready: %w", ids.FormatJobID(job.ID), err)
+}
+
+// preflightCloudNeeds checks external artifacts before allocating a launch or
+// claiming a reuse attempt. Same-batch producers on a fresh launch are resolved
+// after claims establish their concrete CloudAfter attempt pins.
+func preflightCloudNeeds(ctx context.Context, database *sql.DB, client *r2.Client, jobs []*db.Job, targetInstanceID int64) error {
+	batch := make(map[int64]bool, len(jobs))
+	for _, job := range jobs {
+		if job != nil {
+			batch[job.ID] = true
+		}
+	}
+	for _, original := range jobs {
+		if original == nil {
+			continue
+		}
+		job, err := db.GetJobByID(database, original.ID)
+		if err != nil {
+			return fmt.Errorf("read job %s before dependency admission: %w", ids.FormatJobID(original.ID), err)
+		}
+		if job == nil || len(job.Needs) == 0 {
+			continue
+		}
+		if db.IsTerminalStatus(job.Status) || job.Status == db.StatusDraft || job.Tombstoned {
+			return fmt.Errorf("job %s is no longer awaiting dependency admission (status=%s)", ids.FormatJobID(job.ID), job.Status)
+		}
+		candidate := *job
+		if targetInstanceID == 0 {
+			candidate.Needs = make([]string, 0, len(job.Needs))
+			for _, spec := range job.Needs {
+				need, parseErr := runner.ParseNeedsSpec(spec)
+				if parseErr == nil && !need.IsAsset() && need.Version != job.ID && batch[need.Version] {
+					continue
+				}
+				candidate.Needs = append(candidate.Needs, spec)
+			}
+		}
+		_, _, _, err = ClassifyNeedsForLaunch(ctx, database, client, &candidate, targetInstanceID)
+		if err == nil {
+			continue
+		}
+		diagnosis := cloudDependencyDiagnosis(job, err)
+		if confirmedCloudDependencyFailure(err) {
+			if failErr := db.FailCloudDependency(database, job, diagnosis.Error()); failErr != nil {
+				return errors.Join(diagnosis, fmt.Errorf("record dependency failure: %w", failErr))
+			}
+		}
+		return diagnosis
+	}
+	return nil
 }

@@ -1471,6 +1471,26 @@ rule CloudDataStagingViaR2 {
         --   internal/cloud/wrapper.go CloudNeed struct — manifest entry shape
         -- The agent reads cloud_needs from the manifest and rclone-copies
         -- each r2_key into path before starting the job.
+        --
+        -- Existing ready cloud publications are resolved by
+        -- r2resolve.ResolvePublishedNeed within the authoritative attempt.
+        -- A nonempty directory expands into one CloudNeed per child file,
+        -- retaining the original dependency spec and relative child path.
+        -- A dependency path strips one leading slash before normalization;
+        -- listed directory members and archive entries remain strictly relative.
+        -- Staging follows existing symlinks only to targets inside its root.
+        -- A destination must not resolve to the staging root itself.
+        -- Enumeration uses a slash-delimited prefix and rejects escaping,
+        -- duplicate, or file/child-conflicting keys. Publication readiness
+        -- must precede enumeration; a partial pending directory is not ready.
+        -- A declared artifact's own ready state can release its consumers
+        -- before the overall drain finishes. An undeclared path requires
+        -- drain=ready; required-artifacts readiness does not settle it.
+        -- Pending or unknown drain is not confirmed absence, including when
+        -- none of the directory's children are visible yet.
+        -- The agent marks the original dependency satisfied only after all
+        -- child transfers succeed. Empty directories have no supported
+        -- representation in the current publication protocol.
 }
 
 -- Companion rule for on-prem consumers: when an on-prem-bound consumer
@@ -1576,6 +1596,10 @@ rule R2PullInventoryProducerNeedStaging {
         --     materialization and before setup or command execution
         --   internal/runner/commands.go — duplicate adds for the same job/run
         --     merge into one pending or live attempt
+        -- Ready directories expand into exact child-file ArtifactNeed entries
+        -- through r2resolve.ResolvePublishedNeed, preserving the authoritative
+        -- attempt fence and original dependency spec. The runner writes
+        -- satisfied markers only after all child files have been staged.
         -- Missing or pending publication evidence is a structured controller
         -- dispatch refusal. The job is never admitted to an agent-side
         -- preflight loop while its producer artifact is unavailable.

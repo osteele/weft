@@ -11,12 +11,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -45,6 +47,11 @@ var ErrArtifactMissing = errors.New("artifact not found in cloud outputs")
 // tests can stub the R2 round-trip without a live client.
 var ObjectExistsFunc = func(ctx context.Context, client Store, key string) (bool, error) {
 	return client.ObjectExists(ctx, key)
+}
+
+// ListObjectsFunc is the bounded directory probe used for published needs.
+var ListObjectsFunc = func(ctx context.Context, client Lister, prefix string) ([]r2.ObjectInfo, error) {
+	return client.ListObjects(ctx, prefix)
 }
 
 // ListRunIDsFunc enumerates run IDs that have R2 keys under
@@ -147,4 +154,89 @@ func NeedR2Key(ctx context.Context, client Store, jobID int64, latestRunID *int6
 	}
 
 	return "", fmt.Errorf("%w: %q", ErrArtifactMissing, relPath)
+}
+
+// ResolvePublishedNeed resolves a ready publication within one producer attempt.
+// The caller must establish publication readiness before calling: a directory
+// listing alone cannot prove that all of its files have finished uploading.
+// An explicit payload key fences resolution to that backing; otherwise only
+// this attempt's artifact and output prefixes are considered.
+func ResolvePublishedNeed(ctx context.Context, client Store, jobID, runID int64, spec, relPath, payloadKey string) ([]dataplane.ArtifactNeed, error) {
+	rel := path.Clean(strings.TrimPrefix(relPath, "/"))
+	if !safeNeedPath(rel) {
+		return nil, fmt.Errorf("unsafe artifact destination %q", relPath)
+	}
+	artifactPrefix := r2keys.JobAttemptArtifactFilesPrefix(jobID, runID)
+	outputPrefix := r2keys.JobAttemptOutputsPrefix(jobID, runID)
+	keys := []string{artifactPrefix + artifacts.LocalRelativePath(rel), outputPrefix + rel}
+	if payloadKey != "" {
+		key := strings.TrimSuffix(payloadKey, "/")
+		if !safeNeedPath(key) || (!strings.HasPrefix(key, artifactPrefix) && !strings.HasPrefix(key, outputPrefix)) {
+			return nil, fmt.Errorf("artifact payload key %q does not belong to job %d attempt %d", payloadKey, jobID, runID)
+		}
+		keys = []string{key}
+	}
+	for _, key := range keys {
+		needs, err := resolvePublishedKey(ctx, client, spec, rel, key)
+		if err == nil {
+			return needs, nil
+		}
+		if !errors.Is(err, ErrArtifactMissing) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("%w: %q", ErrArtifactMissing, relPath)
+}
+
+func resolvePublishedKey(ctx context.Context, client Store, spec, relPath, key string) ([]dataplane.ArtifactNeed, error) {
+	checkCtx, cancel := context.WithTimeout(ctx, objectExistsTimeout)
+	exists, err := ObjectExistsFunc(checkCtx, client, key)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("check %s: %w", key, err)
+	}
+	if exists {
+		return []dataplane.ArtifactNeed{{Spec: spec, Path: relPath, R2Key: key}}, nil
+	}
+
+	// The trailing slash is a boundary, not merely an optimization: a need
+	// for output/model must never stage output/model-backup or model.pt.
+	prefix := key + "/"
+	listCtx, cancel := context.WithTimeout(ctx, objectExistsTimeout)
+	objects, err := ListObjectsFunc(listCtx, client, prefix)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", prefix, err)
+	}
+	if len(objects) == 0 {
+		return nil, fmt.Errorf("%w: %q", ErrArtifactMissing, relPath)
+	}
+	needs := make([]dataplane.ArtifactNeed, 0, len(objects))
+	seen := make(map[string]struct{}, len(objects))
+	for _, object := range objects {
+		child, ok := strings.CutPrefix(object.Key, prefix)
+		if !ok || !safeNeedPath(child) {
+			return nil, fmt.Errorf("invalid artifact directory member %q under %q", object.Key, prefix)
+		}
+		if _, duplicate := seen[child]; duplicate {
+			return nil, fmt.Errorf("duplicate artifact directory member %q", object.Key)
+		}
+		seen[child] = struct{}{}
+		needs = append(needs, dataplane.ArtifactNeed{
+			Spec: spec, Path: path.Join(relPath, child), R2Key: object.Key,
+		})
+	}
+	for child := range seen {
+		for parent := path.Dir(child); parent != "."; parent = path.Dir(parent) {
+			if _, conflict := seen[parent]; conflict {
+				return nil, fmt.Errorf("artifact directory contains both file %q and child %q", parent, child)
+			}
+		}
+	}
+	sort.Slice(needs, func(i, j int) bool { return needs[i].Path < needs[j].Path })
+	return needs, nil
+}
+
+func safeNeedPath(value string) bool {
+	return value != "." && fs.ValidPath(value) && !strings.ContainsAny(value, "\\\x00")
 }

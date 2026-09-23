@@ -1726,42 +1726,43 @@ func resolveR2QueueNeeds(database *sql.DB, job *db.Job, getR2Client func() (*r2.
 	}
 	var needs []opsqueue.ArtifactNeed
 	for _, n := range pending {
-		key := n.preResolvedR2Key
-		if key == "" {
-			key, err = resolvePublishedProducerNeed(database, n, getR2Client)
+		if n.preResolvedR2Key == "" {
+			resolved, err := resolvePublishedProducerNeed(database, n, getR2Client)
 			if err != nil {
 				return nil, fmt.Errorf("resolve --needs %q: %w", n.spec, err)
 			}
+			needs = append(needs, resolved...)
+			continue
 		}
 		needs = append(needs, opsqueue.ArtifactNeed{
-			Spec: n.spec, Path: n.path, R2Key: key, ContentType: n.contentType,
+			Spec: n.spec, Path: n.path, R2Key: n.preResolvedR2Key, ContentType: n.contentType,
 		})
 	}
 	return needs, nil
 }
 
-func resolvePublishedProducerNeed(database *sql.DB, need pendingNeed, getR2Client func() (*r2.Client, error)) (string, error) {
+func resolvePublishedProducerNeed(database *sql.DB, need pendingNeed, getR2Client func() (*r2.Client, error)) ([]opsqueue.ArtifactNeed, error) {
 	producer, err := db.GetJobByID(database, need.producerID)
 	if err != nil {
-		return "", fmt.Errorf("lookup producer job %s: %w", ids.FormatJobID(need.producerID), err)
+		return nil, fmt.Errorf("lookup producer job %s: %w", ids.FormatJobID(need.producerID), err)
 	}
 	if producer == nil {
-		return "", fmt.Errorf("producer job %s not found", ids.FormatJobID(need.producerID))
+		return nil, fmt.Errorf("producer job %s not found", ids.FormatJobID(need.producerID))
 	}
 	if producer.Status != db.StatusCompleted {
 		if db.IsTerminalStatus(producer.Status) {
-			return "", fmt.Errorf(
+			return nil, fmt.Errorf(
 				"producer job %s publication failed: authoritative attempt ended %s",
 				ids.FormatJobID(producer.ID), producer.Status,
 			)
 		}
-		return "", fmt.Errorf(
+		return nil, fmt.Errorf(
 			"producer job %s publication pending: authoritative attempt is not complete (%s)",
 			ids.FormatJobID(producer.ID), producer.Status,
 		)
 	}
 	if producer.LatestRunID == nil || *producer.LatestRunID <= 0 {
-		return "", fmt.Errorf(
+		return nil, fmt.Errorf(
 			"producer job %s publication unavailable: completed job has no authoritative attempt",
 			ids.FormatJobID(producer.ID),
 		)
@@ -1769,69 +1770,73 @@ func resolvePublishedProducerNeed(database *sql.DB, need pendingNeed, getR2Clien
 	runID := *producer.LatestRunID
 	publication, err := db.GetAttemptPublicationState(database, runID)
 	if err != nil {
-		return "", fmt.Errorf("read producer job %s attempt %d publication: %w", ids.FormatJobID(producer.ID), runID, err)
+		return nil, fmt.Errorf("read producer job %s attempt %d publication: %w", ids.FormatJobID(producer.ID), runID, err)
 	}
-	// The stored row is written by the completion sweep and is not
-	// guaranteed to refresh after the producer turns terminal. When it does
-	// not settle the wanted artifact, consult the authoritative
-	// exact-attempt report before refusing dispatch.
+	// A stored pending/absent row may predate the terminal transition.
+	// Refresh only from the authoritative exact-attempt report.
 	if !publicationTerminallyDecidesNeed(publication, producer.ID, runID, need.path) {
 		if refreshed := refreshAttemptPublicationState(database, getR2Client, producer.ID, runID); refreshed != nil {
 			publication = refreshed
 		}
 	}
 	if publication == nil || publication.AttemptID != runID || publication.JobID != producer.ID {
-		return "", fmt.Errorf(
+		return nil, fmt.Errorf(
 			"producer job %s attempt %d publication unavailable: no attempt-scoped evidence",
 			ids.FormatJobID(producer.ID), runID,
 		)
 	}
 	if publication.ExecutionState != db.PublicationExecutionComplete {
-		return "", fmt.Errorf(
+		return nil, fmt.Errorf(
 			"producer job %s attempt %d publication unavailable: execution state is %s",
 			ids.FormatJobID(producer.ID), runID, publication.ExecutionState,
 		)
 	}
 
 	wanted := cleanPublishedArtifactPath(need.path)
-	for _, artifact := range publication.Artifacts {
+	var matched *db.AttemptPublicationArtifact
+	for i := range publication.Artifacts {
+		artifact := &publication.Artifacts[i]
 		if cleanPublishedArtifactPath(artifact.Path) != wanted {
 			continue
 		}
-		switch artifact.State {
+		if matched != nil {
+			return nil, fmt.Errorf("producer job %s attempt %d artifact %q publication is ambiguous", ids.FormatJobID(producer.ID), runID, need.path)
+		}
+		matched = artifact
+	}
+	if matched != nil {
+		switch matched.State {
 		case db.PublicationStatePending:
-			return "", fmt.Errorf("producer job %s attempt %d artifact %q publication pending", ids.FormatJobID(producer.ID), runID, need.path)
+			return nil, fmt.Errorf("producer job %s attempt %d artifact %q publication pending", ids.FormatJobID(producer.ID), runID, need.path)
 		case db.PublicationStateFailed:
-			return "", fmt.Errorf("producer job %s attempt %d artifact %q publication failed: %s", ids.FormatJobID(producer.ID), runID, need.path, artifact.Detail)
+			return nil, fmt.Errorf("producer job %s attempt %d artifact %q publication failed: %s", ids.FormatJobID(producer.ID), runID, need.path, matched.Detail)
 		case db.PublicationStateReady:
-			if key := strings.TrimSpace(artifact.PayloadKey); key != "" {
-				if !publishedKeyBelongsToAttempt(key, producer.ID, runID) {
-					return "", fmt.Errorf(
-						"producer job %s attempt %d artifact %q publication has mismatched payload key %q",
-						ids.FormatJobID(producer.ID), runID, need.path, key,
-					)
-				}
-				return key, nil
+			key := strings.TrimSpace(matched.PayloadKey)
+			if key != "" && !publishedKeyBelongsToAttempt(key, producer.ID, runID) {
+				return nil, fmt.Errorf(
+					"producer job %s attempt %d artifact %q publication has mismatched payload key %q",
+					ids.FormatJobID(producer.ID), runID, need.path, key,
+				)
 			}
-			return resolveReadyProducerNeedKey(getR2Client, producer.ID, runID, need.path)
+			return resolveReadyProducerNeeds(getR2Client, producer.ID, runID, need, key)
 		default:
-			return "", fmt.Errorf("producer job %s attempt %d artifact %q publication unavailable", ids.FormatJobID(producer.ID), runID, need.path)
+			return nil, fmt.Errorf("producer job %s attempt %d artifact %q publication unavailable", ids.FormatJobID(producer.ID), runID, need.path)
 		}
 	}
 
-	switch publication.RequiredArtifactsState {
+	switch publication.DrainState {
 	case db.PublicationStatePending:
-		return "", fmt.Errorf("producer job %s attempt %d artifact publication pending", ids.FormatJobID(producer.ID), runID)
+		return nil, fmt.Errorf("producer job %s attempt %d artifact publication pending", ids.FormatJobID(producer.ID), runID)
 	case db.PublicationStateFailed:
-		return "", fmt.Errorf("producer job %s attempt %d artifact publication failed: %s", ids.FormatJobID(producer.ID), runID, publication.Detail)
+		return nil, fmt.Errorf("producer job %s attempt %d artifact publication failed: %s", ids.FormatJobID(producer.ID), runID, publication.Detail)
 	case db.PublicationStateReady:
-		return resolveReadyProducerNeedKey(getR2Client, producer.ID, runID, need.path)
+		return resolveReadyProducerNeeds(getR2Client, producer.ID, runID, need, "")
 	default:
 		reason := strings.TrimSpace(publication.UnknownReason)
 		if reason == "" {
 			reason = "no ready publication report was observed"
 		}
-		return "", fmt.Errorf(
+		return nil, fmt.Errorf(
 			"producer job %s attempt %d publication unavailable: %s",
 			ids.FormatJobID(producer.ID), runID, reason,
 		)
@@ -1869,8 +1874,8 @@ func publicationTerminallyDecidesNeed(publication *db.AttemptPublicationState, j
 		}
 		return artifact.State == db.PublicationStateReady || artifact.State == db.PublicationStateFailed
 	}
-	return publication.RequiredArtifactsState == db.PublicationStateReady ||
-		publication.RequiredArtifactsState == db.PublicationStateFailed
+	return publication.DrainState == db.PublicationStateReady ||
+		publication.DrainState == db.PublicationStateFailed
 }
 
 // refreshAttemptPublicationState fetches the authoritative attempt
@@ -1899,51 +1904,35 @@ func refreshAttemptPublicationState(database *sql.DB, getR2Client func() (*r2.Cl
 	return refreshed
 }
 
-func resolveReadyProducerNeedKey(getR2Client func() (*r2.Client, error), jobID, runID int64, artifactPath string) (string, error) {
+func resolveReadyProducerNeeds(getR2Client func() (*r2.Client, error), jobID, runID int64, need pendingNeed, payloadKey string) ([]opsqueue.ArtifactNeed, error) {
 	client, err := getR2Client()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if client == nil || !client.IsConfigured() {
-		return "", errors.New("R2 is not configured")
+		return nil, errors.New("R2 is not configured")
 	}
 	probeCtx, cancel := context.WithTimeout(context.Background(), producerR2ProbeTimeout)
 	defer cancel()
-	key, err := resolveNeedKeyForAttempt(probeCtx, client, jobID, runID, artifactPath)
+	needs, err := r2resolve.ResolvePublishedNeed(probeCtx, client, jobID, runID, need.spec, need.path, payloadKey)
 	if errors.Is(err, r2resolve.ErrArtifactMissing) {
-		return "", fmt.Errorf(
-			"producer job %s attempt %d reported artifact %q ready, but its exact-attempt object is unavailable: %w",
-			ids.FormatJobID(jobID), runID, artifactPath, err,
+		return nil, fmt.Errorf(
+			"producer job %s attempt %d reported artifact %q ready, but its exact-attempt file or directory is unavailable: %w",
+			ids.FormatJobID(jobID), runID, need.path, err,
 		)
 	}
-	return key, err
+	return needs, err
 }
 
 func cleanPublishedArtifactPath(value string) string {
-	cleaned := path.Clean(strings.TrimSpace(strings.ReplaceAll(value, `\`, "/")))
+	normalized := strings.TrimPrefix(strings.TrimSpace(strings.ReplaceAll(value, `\`, "/")), "/")
+	cleaned := path.Clean(normalized)
 	return strings.TrimPrefix(cleaned, "./")
 }
 
 func publishedKeyBelongsToAttempt(key string, jobID, runID int64) bool {
 	return strings.HasPrefix(key, r2keys.JobAttemptOutputsPrefix(jobID, runID)) ||
 		strings.HasPrefix(key, r2keys.JobAttemptArtifactFilesPrefix(jobID, runID))
-}
-
-func resolveNeedKeyForAttempt(ctx context.Context, client r2resolve.Store, jobID, runID int64, relPath string) (string, error) {
-	keys := []string{
-		r2keys.JobAttemptArtifactFilesPrefix(jobID, runID) + artifacts.LocalRelativePath(relPath),
-		r2keys.JobAttemptOutputsPrefix(jobID, runID) + path.Clean(strings.TrimPrefix(relPath, "/")),
-	}
-	for _, key := range keys {
-		exists, err := r2resolve.ObjectExistsFunc(ctx, client, key)
-		if err != nil {
-			return "", fmt.Errorf("check %s: %w", key, err)
-		}
-		if exists {
-			return key, nil
-		}
-	}
-	return "", fmt.Errorf("%w: %q", r2resolve.ErrArtifactMissing, relPath)
 }
 
 func hasNamedAssetNeed(specs []string) bool {

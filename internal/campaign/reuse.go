@@ -1146,6 +1146,9 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			return err
 		}
 	}
+	if err := preflightCloudNeeds(ctx, database, r2Client, jobs, instanceID); err != nil {
+		return err
+	}
 	if err := validateJobsFitReusableInstance(database, inst, jobs, r2Client); err != nil {
 		return err
 	}
@@ -1287,11 +1290,15 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(opCtx, database, r2Client, job, instanceID)
 		if err != nil {
-			rollbackErr := rollbackClaims()
-			if rollbackErr != nil {
-				return fmt.Errorf("%w (rollback: %v)", err, rollbackErr)
+			diagnosis := cloudDependencyDiagnosis(job, err)
+			if transfer {
+				return errors.Join(diagnosis, rollbackClaims())
 			}
-			return err
+			var failedJob *db.Job
+			if confirmedCloudDependencyFailure(err) {
+				failedJob = job
+			}
+			return errors.Join(diagnosis, db.RejectReuseForCloudDependency(database, claimedJobs, failedJob, diagnosis.Error()))
 		}
 		if err := PersistResolvedCloudAfterPins(database, job, cloudAfter); err != nil {
 			rollbackErr := rollbackClaims()

@@ -23,7 +23,6 @@ import (
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
-	"github.com/osteele/weft/internal/cloudneeds"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -2299,6 +2298,11 @@ func LaunchInstance(
 	}
 
 	ctx := context.Background()
+	if !opts.HedgeProbe {
+		if err := preflightCloudNeeds(ctx, database, r2Assets.Client, group.Jobs, 0); err != nil {
+			return 0, err
+		}
+	}
 	requiredGPUs := requiredGPUCountForGroup(group)
 	if requiredGPUs > 1 {
 		if err := validateOfferGPUCount(group, offer); err != nil {
@@ -2553,9 +2557,8 @@ func LaunchInstance(
 	}
 	failLaunchBeforeCreate := func(detail string, err error) (int64, error) {
 		reason := db.TerminationReasonInfraFailure
-		if errors.Is(err, cloudneeds.ErrArtifactPublicationFailed) {
-			reason = db.TerminationReasonInvalidRequest
-		}
+		// Dependency resolution has its own non-infrastructure disposition
+		// below; this closure handles actual launch preparation failures.
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, reason, detail+": "+err.Error())
 		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance "+detail+" before destination acceptance")
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
@@ -2584,7 +2587,15 @@ func LaunchInstance(
 		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Assets.Client, job, instanceID)
 		if err != nil {
-			return failLaunchBeforeCreate("cloud needs resolution failed", err)
+			diagnosis := cloudDependencyDiagnosis(job, err)
+			var failedJob *db.Job
+			if confirmedCloudDependencyFailure(err) {
+				failedJob = job
+			}
+			if cancelErr := db.CancelLaunchForCloudDependency(database, instanceID, failedJob, diagnosis.Error()); cancelErr != nil {
+				return instanceID, errors.Join(diagnosis, fmt.Errorf("finalize dependency-rejected launch: %w", cancelErr))
+			}
+			return instanceID, diagnosis
 		}
 		if err := PersistResolvedCloudAfterPins(database, job, cloudAfter); err != nil {
 			return failLaunchBeforeCreate("cloud-after pin persistence failed", err)

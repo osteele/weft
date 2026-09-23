@@ -935,6 +935,20 @@ rule DependencyGatesRentalLaunch {
         -- not get scheduled onto independent cloud instances that cannot
         -- coordinate queue ordering with each other.
         -- Deferred jobs are re-evaluated on the next launch pass.
+        --
+        -- Artifact dependency admission runs before fresh launch allocation
+        -- and reuse claims (campaign.preflightCloudNeeds). Confirmed failed
+        -- publication or positively absent ready payloads fail only the
+        -- affected consumer with dependency_failed. Pending publication,
+        -- unknown evidence, and lookup errors defer without allocating a
+        -- rental attempt. Same-batch producer pins are resolved after claims.
+        -- A dependency rejection after claims closes a pre-provider launch
+        -- as invalid_request for confirmed failure, or canceled otherwise,
+        -- and releases healthy siblings without orphan outcomes. Reuse
+        -- rejection preserves the healthy running instance. Terminal writes
+        -- are attempt-fenced and preserve newer cancellation, draft, and move
+        -- intent. Dependency failures contribute neither infrastructure
+        -- failures nor orphan churn to the runaway breaker.
 }
 
 rule DeferredDependencyDemandAndSuccessHandoff {

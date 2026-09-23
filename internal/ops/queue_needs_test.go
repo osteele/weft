@@ -25,11 +25,11 @@ func setupR2QueueNeeds(t *testing.T) (*sql.DB, *fakeInventoryQueueStore, func([]
 	t.Helper()
 	database := db.SetupTestDB(t)
 	oldLoad, oldStore, oldSSH := loadQueueConfig, newInventoryQueueStore, appendQueueCommandSSH
-	oldExists, oldRuns := r2resolve.ObjectExistsFunc, r2resolve.ListRunIDsFunc
+	oldExists, oldRuns, oldList := r2resolve.ObjectExistsFunc, r2resolve.ListRunIDsFunc, r2resolve.ListObjectsFunc
 	oldReportFetch := getAttemptPublicationReport
 	t.Cleanup(func() {
 		loadQueueConfig, newInventoryQueueStore, appendQueueCommandSSH = oldLoad, oldStore, oldSSH
-		r2resolve.ObjectExistsFunc, r2resolve.ListRunIDsFunc = oldExists, oldRuns
+		r2resolve.ObjectExistsFunc, r2resolve.ListRunIDsFunc, r2resolve.ListObjectsFunc = oldExists, oldRuns, oldList
 		getAttemptPublicationReport = oldReportFetch
 	})
 	loadQueueConfig = func() (*config.Config, error) {
@@ -47,9 +47,18 @@ func setupR2QueueNeeds(t *testing.T) (*sql.DB, *fakeInventoryQueueStore, func([]
 		t.Fatal("R2-pull dispatch attempted SSH")
 		return "", "", 1
 	})
-	r2resolve.ObjectExistsFunc = func(context.Context, r2resolve.Store, string) (bool, error) {
-		t.Fatal("unexpected producer R2 lookup")
-		return false, nil
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, key string) (bool, error) {
+		_, exists := store.objects[key]
+		return exists, nil
+	}
+	r2resolve.ListObjectsFunc = func(_ context.Context, _ r2resolve.Lister, prefix string) ([]r2.ObjectInfo, error) {
+		var objects []r2.ObjectInfo
+		for key := range store.objects {
+			if strings.HasPrefix(key, prefix) {
+				objects = append(objects, r2.ObjectInfo{Key: key})
+			}
+		}
+		return objects, nil
 	}
 	r2resolve.ListRunIDsFunc = func(context.Context, r2resolve.Lister, int64) ([]int64, error) {
 		return nil, nil
@@ -156,6 +165,11 @@ func publishNeedProducer(t *testing.T, database *sql.DB, spec, key string, runID
 	}); err != nil {
 		t.Fatal(err)
 	}
+	store, err := newInventoryQueueStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.(*fakeInventoryQueueStore).objects[key] = []byte("published producer bytes")
 }
 
 func recordNeedProducer(t *testing.T, database *sql.DB, host string) (string, string) {
@@ -316,6 +330,7 @@ func TestR2QueueProducerNeedRefreshesPublicationFromAttemptReport(t *testing.T) 
 				}
 			}
 			stubAttemptPublicationReport(t, producerID, runID, attemptPublicationReportPayload(key))
+			store.objects[key] = []byte("published producer bytes")
 			job := recordR2NeedsConsumer(t, database, []string{spec})
 
 			if err := AppendJobToQueue(database, job, time.Second); err != nil {
@@ -595,5 +610,120 @@ func TestR2QueueNamedAssetsUnaffectedByVersion(t *testing.T) {
 	}
 	if adds := r2QueueAdds(t, store); len(adds) != 1 {
 		t.Fatalf("got %d queue adds, want 1", len(adds))
+	}
+}
+
+func TestR2QueueProducerDirectoryExpandsOnlyReadyAuthoritativeAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name, readiness, pathPrefix string
+	}{
+		{name: "ready", readiness: db.PublicationStateReady},
+		{name: "pending", readiness: db.PublicationStatePending},
+		{name: "failed", readiness: db.PublicationStateFailed},
+		{name: "leading slash", readiness: db.PublicationStateReady, pathPrefix: "/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, store, _ := setupR2QueueNeeds(t)
+			fileSpec, _, runID := recordNeedProducerWithoutPublication(t, database, "")
+			var producerID int64
+			if _, err := fmt.Sscanf(fileSpec, "outputs/result.bin:%d", &producerID); err != nil {
+				t.Fatal(err)
+			}
+			const directory = "outputs/model"
+			spec := fmt.Sprintf("%s%s:%d", tc.pathPrefix, directory, producerID)
+			key := r2keys.JobAttemptOutputsPrefix(producerID, runID) + directory
+			now := time.Now().Unix()
+			if _, err := db.UpsertAttemptPublicationState(database, &db.AttemptPublicationState{
+				AttemptID: runID, JobID: producerID, Sequence: 1, ObservedAt: now,
+				ExecutionState:         db.PublicationExecutionComplete,
+				RequiredArtifactsState: db.PublicationStatePending, DrainState: db.PublicationStatePending,
+				Artifacts: []db.AttemptPublicationArtifact{{Name: "model", Path: directory, State: tc.readiness, PayloadKey: key}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			store.objects[key+"/weights.bin"] = []byte("weights")
+			store.objects[key+"/nested/config.json"] = []byte("{}")
+			store.objects[key+"-backup/leak"] = []byte("sibling")
+			store.objects[r2keys.JobAttemptOutputsPrefix(producerID, runID+1)+directory+"/other"] = []byte("wrong attempt")
+			job := recordR2NeedsConsumer(t, database, []string{spec})
+			err := AppendJobToQueue(database, job, time.Second)
+			adds := r2QueueAdds(t, store)
+			if tc.readiness != db.PublicationStateReady {
+				if err == nil || len(adds) != 0 {
+					t.Fatalf("unready directory dispatched: %+v, %v", adds, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []opsqueue.ArtifactNeed{
+				{Spec: spec, Path: directory + "/nested/config.json", R2Key: key + "/nested/config.json"},
+				{Spec: spec, Path: directory + "/weights.bin", R2Key: key + "/weights.bin"},
+			}
+			if len(adds) != 1 || !reflect.DeepEqual(adds[0].ArtifactNeeds, want) {
+				t.Fatalf("directory queue needs = %+v, want %+v", adds, want)
+			}
+		})
+	}
+}
+
+func TestR2QueueProducerReadyPublicationWithoutBytesRefusesDispatch(t *testing.T) {
+	database, store, _ := setupR2QueueNeeds(t)
+	spec, key := recordNeedProducer(t, database, "")
+	delete(store.objects, key)
+	job := recordR2NeedsConsumer(t, database, []string{spec})
+	err := AppendJobToQueue(database, job, time.Second)
+	if !errors.Is(err, r2resolve.ErrArtifactMissing) || len(r2QueueAdds(t, store)) != 0 {
+		t.Fatalf("ready publication without bytes dispatched: %v", err)
+	}
+}
+
+func TestR2QueueUndeclaredDirectoryWaitsForDrainAndRefreshes(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%t", partial), func(t *testing.T) {
+			database, store, _ := setupR2QueueNeeds(t)
+			fileSpec, _, runID := recordNeedProducerWithoutPublication(t, database, "")
+			var producerID int64
+			if _, err := fmt.Sscanf(fileSpec, "outputs/result.bin:%d", &producerID); err != nil {
+				t.Fatal(err)
+			}
+			const directory = "outputs/model"
+			spec := fmt.Sprintf("%s:%d", directory, producerID)
+			key := r2keys.JobAttemptOutputsPrefix(producerID, runID) + directory
+			if _, err := db.UpsertAttemptPublicationState(database, &db.AttemptPublicationState{
+				AttemptID: runID, JobID: producerID, Sequence: 1, ObservedAt: time.Now().Unix(),
+				ExecutionState:         db.PublicationExecutionComplete,
+				RequiredArtifactsState: db.PublicationStateReady,
+				DrainState:             db.PublicationStatePending,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if partial {
+				store.objects[key+"/weights.bin"] = []byte("weights")
+			}
+			job := recordR2NeedsConsumer(t, database, []string{spec})
+			err := AppendJobToQueue(database, job, time.Second)
+			if err == nil || errors.Is(err, r2resolve.ErrArtifactMissing) || len(r2QueueAdds(t, store)) != 0 {
+				t.Fatalf("pending drain admitted partial data or reported confirmed absence: %v", err)
+			}
+
+			stubAttemptPublicationReport(t, producerID, runID, []byte(
+				`{"sequence":2,"observed_at_unix":1700000000,"facets":{"execution_state":"complete","required_artifacts_state":"ready","drain_state":"ready"}}`,
+			))
+			store.objects[key+"/weights.bin"] = []byte("weights")
+			store.objects[key+"/nested/config.json"] = []byte("{}")
+			if err := AppendJobToQueue(database, job, time.Second); err != nil {
+				t.Fatalf("ready drain did not release the dependency: %v", err)
+			}
+			adds := r2QueueAdds(t, store)
+			want := []opsqueue.ArtifactNeed{
+				{Spec: spec, Path: directory + "/nested/config.json", R2Key: key + "/nested/config.json"},
+				{Spec: spec, Path: directory + "/weights.bin", R2Key: key + "/weights.bin"},
+			}
+			if len(adds) != 1 || !reflect.DeepEqual(adds[0].ArtifactNeeds, want) {
+				t.Fatalf("drained directory queue needs = %+v, want %+v", adds, want)
+			}
+		})
 	}
 }

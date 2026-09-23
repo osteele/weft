@@ -54,6 +54,17 @@ func stageArtifactNeeds(bucket string, jobID int64, workDir string, needs []clou
 	if expandedWorkDir == "" {
 		return fmt.Errorf("artifact staging: empty working dir")
 	}
+	expandedWorkDir, err := filepath.Abs(expandedWorkDir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(expandedWorkDir, 0o755); err != nil {
+		return err
+	}
+	expandedWorkDir, err = filepath.EvalSymlinks(expandedWorkDir)
+	if err != nil {
+		return err
+	}
 
 	fmt.Printf("Job %d: artifact staging start (%d artifact%s)\n", jobID, len(needs), pluralSuffix(len(needs)))
 	oplog.LogJob(oplog.OpJobSync, jobID, "",
@@ -83,7 +94,10 @@ func stageArtifactNeeds(bucket string, jobID int64, workDir string, needs []clou
 }
 
 func stageOneCloudNeed(bucket string, jobID int64, expandedWorkDir string, need cloud.CloudNeed, label string) error {
-	targetPath := filepath.Join(expandedWorkDir, filepath.FromSlash(strings.TrimPrefix(need.Path, "/")))
+	targetPath, err := archiveMemberTarget(expandedWorkDir, strings.TrimPrefix(need.Path, "/"))
+	if err != nil {
+		return fmt.Errorf("prepare local staging path for %q: %w", label, err)
+	}
 	if err := prepareCloudNeedTarget(targetPath, need.ContentType); err != nil {
 		return fmt.Errorf("prepare local staging path for %q: %w", label, err)
 	}
@@ -160,20 +174,45 @@ func extractCloudNeedArchive(archivePath, targetDir string) error {
 	}
 }
 
+// root is an absolute, symlink-resolved directory. Archive member names stay
+// strictly relative; dependency paths are normalized before reaching this helper.
 func archiveMemberTarget(root, name string) (string, error) {
+	if strings.ContainsAny(name, "\\\x00") {
+		return "", fmt.Errorf("unsafe artifact member path %q", name)
+	}
 	cleanName := filepath.Clean(filepath.FromSlash(name))
-	if cleanName == "." || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanName) {
-		return "", fmt.Errorf("unsafe archive member path %q", name)
+	if cleanName == "." || cleanName == ".." || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanName) {
+		return "", fmt.Errorf("unsafe artifact member path %q", name)
 	}
-	target := filepath.Join(root, cleanName)
-	absTarget, err := filepath.Abs(target)
-	if err != nil {
-		return "", err
+	current := root
+	remaining := cleanName
+	for remaining != "" {
+		part, rest, _ := strings.Cut(remaining, string(filepath.Separator))
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return filepath.Join(current, rest), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			relative, err := filepath.Rel(root, resolved)
+			if err != nil || !filepath.IsLocal(relative) {
+				return "", fmt.Errorf("artifact member escapes target directory: %q", name)
+			}
+			current = resolved
+		}
+		remaining = rest
 	}
-	if absTarget != root && !strings.HasPrefix(absTarget, root+string(filepath.Separator)) {
-		return "", fmt.Errorf("archive member escapes target directory: %q", name)
+	if current == root {
+		return "", fmt.Errorf("artifact member resolves to target directory: %q", name)
 	}
-	return absTarget, nil
+	return current, nil
 }
 
 func writeCloudNeedSatisfiedMarker(jobID int64, spec string) error {

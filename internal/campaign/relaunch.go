@@ -1425,7 +1425,7 @@ func failingProvidersInWindow(database *sql.DB, jobIDs []int64, since int64) (ma
 		holders = append(holders, "?")
 		args = append(args, id)
 	}
-	args = append(args, since)
+	args = append(args, db.FailureReasonDependencyFailed, since)
 	rows, err := database.Query(fmt.Sprintf(`
 		SELECT COALESCE(l.provider, '') AS prov, COUNT(DISTINCT ja.launch_id)
 		  FROM job_attempts ja
@@ -1433,6 +1433,7 @@ func failingProvidersInWindow(database *sql.DB, jobIDs []int64, since int64) (ma
 		 WHERE ja.launch_id IS NOT NULL
 		   AND ja.cloud_outcome IN ('orphaned', 'failed')
 		   AND ja.job_id IN (%s)
+		   AND COALESCE(ja.failure_reason, '') != ?
 		   AND COALESCE(ja.end_time, ja.start_time, 0) >= ?
 		 GROUP BY prov`, strings.Join(holders, ",")), args...)
 	if err != nil {

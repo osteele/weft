@@ -179,3 +179,138 @@ func TestStageCloudNeedsRemovesDirectoryArchiveBeforeNextNeed(t *testing.T) {
 		t.Fatalf("stageCloudNeeds: %v", err)
 	}
 }
+
+func TestStageCloudNeeds_ProducerDirectoryMarksOnlyAfterAllChildren(t *testing.T) {
+	for _, failLast := range []bool{false, true} {
+		t.Run(fmt.Sprintf("last-child-fails=%t", failLast), func(t *testing.T) {
+			workDir := t.TempDir()
+			homeDir := t.TempDir()
+			t.Setenv("HOME", homeDir)
+			const spec = "output/model:41"
+			needs := []cloud.CloudNeed{
+				{Spec: spec, Path: "output/model/weights.bin", R2Key: "jobs/41/runs/7/outputs/output/model/weights.bin"},
+				{Spec: spec, Path: "output/model/nested/config.json", R2Key: "jobs/41/runs/7/outputs/output/model/nested/config.json"},
+			}
+			marker := runner.ArtifactSatisfiedFile(filepath.Join(homeDir, ".cache", "weft", "logs"), "output/model", 41)
+			prev := copyCloudNeedFromR2Func
+			t.Cleanup(func() { copyCloudNeedFromR2Func = prev })
+			copyCloudNeedFromR2Func = func(_, key, targetPath string) error {
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatalf("directory marked ready before all children staged: %v", err)
+				}
+				if failLast && key == needs[1].R2Key {
+					return fmt.Errorf("interrupted nested download")
+				}
+				return os.WriteFile(targetPath, []byte(key), 0o644)
+			}
+			err := stageCloudNeeds("bucket", 123, workDir, needs)
+			if failLast {
+				if err == nil {
+					t.Fatal("partial directory accepted")
+				}
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatalf("partial directory acquired satisfied marker: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, need := range needs {
+				got, err := os.ReadFile(filepath.Join(workDir, filepath.FromSlash(need.Path)))
+				if err != nil || string(got) != need.R2Key {
+					t.Fatalf("child %s = %q, %v", need.Path, got, err)
+				}
+			}
+			if got, err := os.ReadFile(marker); err != nil || string(got) != "0\n" {
+				t.Fatalf("directory satisfied marker = %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestStageCloudNeeds_RejectsEscapingDestination(t *testing.T) {
+	for _, tc := range []struct {
+		destination, contentType string
+	}{
+		{destination: "../escape"},
+		{destination: "/../escape"},
+		{destination: `output\escape`},
+		{destination: "output/link/escape"},
+		{destination: "output/root", contentType: "directory"},
+	} {
+		t.Run(tc.destination, func(t *testing.T) {
+			workDir := t.TempDir()
+			outside := t.TempDir()
+			if err := os.Mkdir(filepath.Join(workDir, "output"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(workDir, "output", "link")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("..", filepath.Join(workDir, "output", "root")); err != nil {
+				t.Fatal(err)
+			}
+			prev := copyCloudNeedFromR2Func
+			t.Cleanup(func() { copyCloudNeedFromR2Func = prev })
+			copyCloudNeedFromR2Func = func(_, _, target string) error {
+				t.Fatalf("unsafe destination reached downloader: %s", target)
+				return nil
+			}
+			err := stageCloudNeeds("bucket", 123, workDir, []cloud.CloudNeed{
+				{Spec: "output/model:41", Path: tc.destination, R2Key: "jobs/41/runs/7/outputs/output/model/file", ContentType: tc.contentType},
+			})
+			if err == nil {
+				t.Fatal("escaping destination accepted")
+			}
+		})
+	}
+}
+
+func TestStageCloudNeeds_PreservesWorkdirPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, destination, link, linkTarget string
+		directoryLink                             bool
+	}{
+		{name: "in-tree directory symlink", path: "models/nested/model.pt", destination: "data/nested/model.pt", link: "models", linkTarget: "data", directoryLink: true},
+		{name: "in-tree file symlink", path: "model.pt", destination: "data/model.pt", link: "model.pt", linkTarget: "data/model.pt"},
+		{name: "workdir alias parent", path: "root/model.pt", destination: "model.pt", link: "root", linkTarget: ".", directoryLink: true},
+		{name: "leading slash", path: "/data/model.pt", destination: "data/model.pt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			t.Setenv("HOME", t.TempDir())
+			if tc.link != "" {
+				linkTarget := filepath.Join(workDir, tc.linkTarget)
+				if tc.directoryLink {
+					if err := os.MkdirAll(linkTarget, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.MkdirAll(filepath.Dir(linkTarget), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(linkTarget, []byte("old"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink(tc.linkTarget, filepath.Join(workDir, tc.link)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previousCopy := copyCloudNeedFromR2Func
+			t.Cleanup(func() { copyCloudNeedFromR2Func = previousCopy })
+			copyCloudNeedFromR2Func = func(_, _, target string) error {
+				return os.WriteFile(target, []byte("model"), 0o644)
+			}
+			needs := []cloud.CloudNeed{{Spec: tc.path + ":41", Path: tc.path, R2Key: "jobs/41/runs/7/outputs/data/model.pt"}}
+			if err := stageCloudNeeds("bucket", 123, workDir, needs); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(workDir, tc.destination))
+			if err != nil || string(got) != "model" {
+				t.Fatalf("staged model = %q, %v", got, err)
+			}
+		})
+	}
+}

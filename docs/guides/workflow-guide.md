@@ -1403,9 +1403,28 @@ the consumer starts. `--produces` paths are uploaded to R2 with no size cap, so
 multi-GB checkpoints, representation pkls, etc. are supported as artifact
 edges.
 
-Each `--needs` spec names a single file (`path:<numeric-job-id>`), not a directory.
-Directory targets such as `--needs output/:1046` are not supported — give each
-file its own `--needs` flag.
+A `--needs` spec uses `path:<numeric-job-id>`. Rental and R2-pull consumers
+accept a file or a published, nonempty directory, for example
+`--needs output/checkpoint:1046`. A directory must have ready publication
+evidence for the producer attempt. With attempt-scoped publication evidence,
+an individually ready declared artifact is usable before the overall drain
+completes. Undeclared paths require a `ready` drain state. Weft stages a
+directory's child files at their relative paths and marks the dependency
+satisfied after every transfer succeeds. Legacy SSH consumer staging accepts
+individual files.
+
+Dependency paths are relative to the consumer's working directory. A leading
+`/` is workdir-relative, not a filesystem-root destination. Staging follows
+symlinks whose resolved targets stay within the working directory; paths
+and symlinks that escape it are rejected. The destination must name a file
+or subdirectory, not the working directory itself.
+
+A confirmed failed publication, or ready publication whose bytes are
+confirmed absent, fails the rental consumer with `dependency_failed`.
+Repair or republish the producer artifact, then restart the consumer.
+Pending publication and unsuccessful storage lookups defer admission.
+These dependency rejections do not count as infrastructure failures or
+trip the runaway breaker.
 
 `--needs` resolves against the producer's recorded artifacts, not its live
 state. A rental producer that already completed (hours or days ago) works the
