@@ -24,8 +24,10 @@ highest release line an upper bound admits after wildcard exclusions
 (`torch>=2.2,<2.8,!=2.7.*` -> 2.6). Each such environment contributes to the
 CUDA/driver floor, max-merged across the scripts a command references; a
 range with no determinable release line takes the newest-torch CUDA floor
-(`dataloc.OpenEndedTorchCUDAFloor`). `dataloc.ScanCommandPythonEnvs` classifies
-each shell step: a direct `uv run script.py` of a PEP 723 script runs that
+(`dataloc.OpenEndedTorchCUDAFloor`). `dataloc.ScanCommandPythonEnvs` splits the
+command into steps at unquoted shell operators (quotes and escapes are
+honoured, so `echo 'a; b'` is one step) and classifies
+each step: a direct `uv run script.py` of a PEP 723 script runs that
 script's environment; `uv run python ...`, `uv run <tool>`, bare `python ...`,
 and any executable not known to be non-Python run in the project environment;
 builtins and utilities such as `cd`, `echo`, `mkdir` and `export` are neutral.

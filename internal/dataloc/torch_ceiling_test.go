@@ -99,6 +99,21 @@ func TestResolveJobTorchMaxComputeCapForPersistence_ScriptTorchBound(t *testing.
 			map[string]string{"second.py": torch291},
 			"echo start && mkdir -p out && FOO=1 uv run scripts/second.py | tee out/log", "12.0",
 		},
+		{
+			"quoted operators in a neutral command are not steps", "2.6.0",
+			map[string]string{"second.py": torch291},
+			`echo 'start; ready' && echo "a | python b" && uv run scripts/second.py`, "12.0",
+		},
+		{
+			"quoted operators in script arguments are not steps", "2.6.0",
+			map[string]string{"second.py": torch291},
+			`uv run 'scripts/second.py' --tag 'a;b|python c' --note "x && python y" 2>&1`, "12.0",
+		},
+		{
+			"unquoted semicolon still starts a project-env step", "2.6.0",
+			map[string]string{"prep.py": "", "second.py": torch291},
+			`echo 'ok'; python scripts/prep.py && uv run scripts/second.py`, "9.0",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

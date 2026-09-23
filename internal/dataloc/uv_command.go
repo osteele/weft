@@ -16,10 +16,91 @@ func DirectUVRunPEP723Script(dir, command string) string {
 	return script
 }
 
-// shellStepSeparators splits a command at shell list and pipeline operators,
-// after joining backslash line continuations; "||" precedes "|" so the
-// replacer matches the longer operator.
-var shellStepSeparators = strings.NewReplacer("\\\n", " ", "&&", "\n", "||", "\n", "|", "\n", ";", "\n")
+// shellSteps splits command into simple-command steps at unquoted list,
+// pipeline, background and grouping operators (&&, ||, |, ;, &, newline,
+// parentheses, backticks) and returns each step's words with quoting removed.
+// Single quotes are literal; double quotes honour backslash escapes of $, `,
+// ", \ and newline; an unquoted backslash escapes the next character, and
+// backslash-newline continues the line. An unquoted # starting a word begins a
+// comment. `&` in a redirection (2>&1, &>) is not an operator. Command
+// substitution inside double quotes is not parsed. Empty steps are omitted.
+func shellSteps(command string) [][]string {
+	var steps [][]string
+	var words []string
+	var word strings.Builder
+	inWord := false
+	endWord := func() {
+		if inWord {
+			words = append(words, word.String())
+			word.Reset()
+			inWord = false
+		}
+	}
+	endStep := func() {
+		endWord()
+		if len(words) > 0 {
+			steps = append(steps, words)
+			words = nil
+		}
+	}
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case c == '\\':
+			if i+1 < len(command) {
+				i++
+				if command[i] != '\n' {
+					word.WriteByte(command[i])
+					inWord = true
+				}
+			}
+		case c == '\'':
+			inWord = true
+			end := strings.IndexByte(command[i+1:], '\'')
+			if end < 0 {
+				end = len(command) - i - 1
+			}
+			word.WriteString(command[i+1 : i+1+end])
+			i += end + 1
+		case c == '"':
+			inWord = true
+			for i++; i < len(command) && command[i] != '"'; i++ {
+				if command[i] == '\\' && i+1 < len(command) && strings.IndexByte("$`\"\\\n", command[i+1]) >= 0 {
+					i++
+					if command[i] == '\n' {
+						continue
+					}
+				}
+				word.WriteByte(command[i])
+			}
+		case c == ' ' || c == '\t':
+			endWord()
+		case c == '#' && !inWord:
+			for i+1 < len(command) && command[i+1] != '\n' {
+				i++
+			}
+		case c == '&' && isRedirectionAmpersand(command, i):
+			word.WriteByte(c)
+			inWord = true
+		case strings.IndexByte(";&|\n()`", c) >= 0:
+			endStep()
+		default:
+			word.WriteByte(c)
+			inWord = true
+		}
+	}
+	endStep()
+	return steps
+}
+
+// isRedirectionAmpersand reports whether the unquoted & at command[i] belongs
+// to a redirection such as 2>&1, <&3 or &>log rather than being an operator.
+func isRedirectionAmpersand(command string, i int) bool {
+	if i > 0 && (command[i-1] == '>' || command[i-1] == '<') {
+		return true
+	}
+	return i+1 < len(command) && command[i+1] == '>'
+}
 
 // CommandPythonEnvs classifies the Python environments a shell command's
 // steps run in.
@@ -49,28 +130,27 @@ var neutralCommands = map[string]bool{
 // commandWrappers run the rest of the step as the command.
 var commandWrappers = map[string]bool{"env": true, "time": true, "nohup": true, "exec": true}
 
-// ScanCommandPythonEnvs splits command into shell steps and classifies each.
-// Unrecognized executables count as project-environment Python: treating a
-// step as project Python can only add the project torch's constraints, never
-// drop a script environment's.
+// ScanCommandPythonEnvs splits command into shell steps (see shellSteps) and
+// classifies each. Unrecognized executables count as project-environment
+// Python: treating a step as project Python can only add the project torch's
+// constraints, never drop a script environment's.
 func ScanCommandPythonEnvs(dir, command string) CommandPythonEnvs {
 	var out CommandPythonEnvs
-	for _, step := range strings.Split(shellStepSeparators.Replace(command), "\n") {
-		tokens := strings.Fields(step)
+	for _, words := range shellSteps(command) {
 		i := 0
-		for i < len(tokens) && (isShellAssignment(tokens[i]) || commandWrappers[trimStepToken(tokens[i])]) {
+		for i < len(words) && (isShellAssignment(words[i]) || commandWrappers[words[i]]) {
 			i++
 		}
-		if i >= len(tokens) {
+		if i >= len(words) {
 			continue
 		}
-		name := filepath.Base(trimStepToken(tokens[i]))
+		name := filepath.Base(words[i])
 		switch {
 		case name == "uv":
-			if i+1 >= len(tokens) || trimShellToken(tokens[i+1]) != "run" {
+			if i+1 >= len(words) || words[i+1] != "run" {
 				continue // uv sync, uv pip, ...: no user Python runs.
 			}
-			target := trimStepToken(uvRunTarget(tokens[i+2:]))
+			target := uvRunTarget(words[i+2:])
 			if strings.HasSuffix(target, ".py") && ScriptHasPEP723Metadata(dir, command, target) {
 				out.Scripts = append(out.Scripts, target)
 			} else {
@@ -94,11 +174,14 @@ func directUVRunScript(command string) string {
 	}
 
 	tokens := strings.Fields(command)
+	for i, token := range tokens {
+		tokens[i] = trimShellToken(token)
+	}
 	i := 0
 	for i < len(tokens) && isShellAssignment(tokens[i]) {
 		i++
 	}
-	if i+1 >= len(tokens) || filepath.Base(trimShellToken(tokens[i])) != "uv" || trimShellToken(tokens[i+1]) != "run" {
+	if i+1 >= len(tokens) || filepath.Base(tokens[i]) != "uv" || tokens[i+1] != "run" {
 		return ""
 	}
 	script := uvRunTarget(tokens[i+2:])
@@ -109,33 +192,28 @@ func directUVRunScript(command string) string {
 }
 
 // uvRunTarget returns the command or script that `uv run` executes, given the
-// tokens after `uv run`: the first token after uv's own options.
-func uvRunTarget(tokens []string) string {
+// unquoted words after `uv run`: the first word after uv's own options.
+func uvRunTarget(words []string) string {
 	i := 0
-	for i < len(tokens) {
-		token := trimShellToken(tokens[i])
-		if token == "--" {
+	for i < len(words) {
+		word := words[i]
+		if word == "--" {
 			i++
 			break
 		}
-		if !strings.HasPrefix(token, "-") {
+		if !strings.HasPrefix(word, "-") {
 			break
 		}
-		if uvRunOptionTakesValue(token) && !strings.Contains(token, "=") {
+		if uvRunOptionTakesValue(word) && !strings.Contains(word, "=") {
 			i += 2
 			continue
 		}
 		i++
 	}
-	if i >= len(tokens) {
+	if i >= len(words) {
 		return ""
 	}
-	return trimShellToken(tokens[i])
-}
-
-// trimStepToken strips quotes and subshell parentheses from a step token.
-func trimStepToken(token string) string {
-	return strings.Trim(token, `"'()`)
+	return words[i]
 }
 
 func trimShellToken(token string) string {

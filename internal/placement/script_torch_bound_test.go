@@ -92,6 +92,24 @@ func TestScriptTorchFloorsIncludeProjectEnvSteps(t *testing.T) {
 	}
 }
 
+// Operators inside quotes are arguments, not steps, so they must not add a
+// project-environment step and pull in the project wheel's 12.8 floor.
+func TestScriptTorchFloorsIgnoreQuotedOperators(t *testing.T) {
+	dir, _ := writeScriptTorchProject(t, "torch>=2.2,<2.7")
+	command := `echo 'start; ready' && uv run scripts/exp.py --tag 'a|python b'`
+
+	want := map[RuntimeFloorMode]string{RuntimeFloorExact: "12.4", RuntimeFloorFamily: "12.0"}
+	for mode, cuda := range want {
+		runtime, err := ResolveEffectiveRuntime(dir, command, EffectiveRuntimeOptions{FloorMode: mode})
+		if err != nil {
+			t.Fatalf("ResolveEffectiveRuntime mode %d: %v", mode, err)
+		}
+		if runtime.Floor.Req.MinCUDAVersion != cuda {
+			t.Errorf("mode %d MinCUDAVersion = %q, want %s from the script's torch 2.6 wheel alone", mode, runtime.Floor.Req.MinCUDAVersion, cuda)
+		}
+	}
+}
+
 func TestScriptTorchOpenRangeKeepsLatestTorchFloor(t *testing.T) {
 	dir, command := writeScriptTorchProject(t, "torch>=2.2")
 
