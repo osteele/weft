@@ -62,6 +62,20 @@ const (
 	EnsureRestarted EnsureAction = "restarted"
 )
 
+// IdentityProbeError means daemon identity is unknown and EnsureCurrent left
+// processes and daemon files untouched.
+type IdentityProbeError struct {
+	Err error
+}
+
+func (e *IdentityProbeError) Error() string {
+	return fmt.Sprintf("daemon identity probe failed: %v", e.Err)
+}
+
+func (e *IdentityProbeError) Unwrap() error {
+	return e.Err
+}
+
 type TransitionResult struct {
 	WasInstalled bool
 	OldPID       int
@@ -232,9 +246,13 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 	}
 	socketExists, err := socketPathExists(paths.SocketFile)
 	if err != nil {
-		return status, EnsureNoop, err
+		return status, EnsureNoop, &IdentityProbeError{Err: err}
 	}
-	if info, ok, socketErr := SocketDaemonInfo(paths, 100*time.Millisecond); socketErr != nil {
+	probeWait := wait
+	if probeWait <= 0 {
+		probeWait = 2 * time.Second
+	}
+	if info, ok, socketErr := SocketDaemonInfo(paths, probeWait); socketErr != nil {
 		// A confirmed stale pathname can be left for the replacement daemon to
 		// remove after it owns the process lock. Any other dial failure is
 		// unknown evidence and must not trigger cleanup or restart.
@@ -243,7 +261,7 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 			return status, EnsureRestarted, err
 		}
 		if !IsConfirmedStaleSocketError(socketErr) {
-			return status, EnsureNoop, socketErr
+			return status, EnsureNoop, &IdentityProbeError{Err: socketErr}
 		}
 	} else if ok {
 		socketExists = true
@@ -265,7 +283,7 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 		// The pathname may have disappeared between the initial stat and dial.
 		socketExists, err = socketPathExists(paths.SocketFile)
 		if err != nil {
-			return status, EnsureNoop, err
+			return status, EnsureNoop, &IdentityProbeError{Err: err}
 		}
 	}
 	if status.Live && !socketExists {

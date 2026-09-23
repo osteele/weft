@@ -31,6 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Daemon identity probes**: Recovery uses the caller's probe timeout and reports
+  uncertain daemon identity without suggesting that a start or restart failed.
+  Uncertain probes leave the daemon process and its state files untouched.
 - **Machine-readable job lists**: Explicit sync writes status summaries to stderr,
   keeping JSON and TSV stdout free of human-readable sync diagnostics.
 - **CUDA failure attribution and retry history**: Hardware-fault detection

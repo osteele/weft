@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -18,6 +19,11 @@ func ensureDaemonForWork(w io.Writer) {
 	paths := daemoncontrol.DefaultPaths()
 	status, action, err := ensureDaemonStartedFunc(paths, 2*time.Second)
 	if err != nil {
+		var probeErr *daemoncontrol.IdentityProbeError
+		if errors.As(err, &probeErr) {
+			fmt.Fprintf(w, "warning: daemon status unknown; no lifecycle action taken: %v\n", err)
+			return
+		}
 		fmt.Fprintf(w, "warning: daemon is not current and could not be started or restarted: %v\n", err)
 		fmt.Fprintf(w, "         queued work may not dispatch until `weft daemon restart` succeeds\n")
 		return

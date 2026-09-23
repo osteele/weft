@@ -3,7 +3,9 @@ package daemoncontrol
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -192,7 +194,7 @@ func TestEnsureCurrentRepairsPIDFileFromLiveSocket(t *testing.T) {
 	}
 	defer server.Close()
 
-	status, action, err := EnsureCurrent(paths, 10*time.Millisecond)
+	status, action, err := EnsureCurrent(paths, 2*time.Second)
 	if err != nil {
 		t.Fatalf("EnsureCurrent: %v", err)
 	}
@@ -212,6 +214,214 @@ func TestEnsureCurrentRepairsPIDFileFromLiveSocket(t *testing.T) {
 	}
 	if metadata == nil || metadata.PID != os.Getpid() || metadata.Version != "test-version" {
 		t.Fatalf("metadata = %+v, want repaired daemon metadata", metadata)
+	}
+}
+
+func TestEnsureCurrentWaitsForDelayedIdentity(t *testing.T) {
+	for _, wait := range []time.Duration{5 * time.Second, 0, -time.Second} {
+		t.Run(wait.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			paths := Paths{
+				PIDFile:    filepath.Join(dir, "daemon.pid"),
+				SocketFile: shortTestSocketPath(t),
+				PlistFile:  filepath.Join(dir, "daemon.plist"),
+			}
+			if err := WritePIDFile(paths.PIDFile, os.Getpid()); err != nil {
+				t.Fatal(err)
+			}
+			received := serveDaemonIdentityReply(t, paths.SocketFile, func(conn net.Conn) error {
+				// Delay starts only after receiving the identity request, not
+				// when the listener or client goroutine happens to start.
+				time.Sleep(300 * time.Millisecond)
+				return json.NewEncoder(conn).Encode(daemonapi.Event{
+					Type:   daemonapi.EventDaemonInfo,
+					Daemon: &daemonapi.DaemonInfo{PID: os.Getpid()},
+				})
+			})
+			type result struct {
+				status Status
+				action EnsureAction
+				err    error
+			}
+			done := make(chan result, 1)
+			go func() {
+				status, action, err := EnsureCurrent(paths, wait)
+				done <- result{status, action, err}
+			}()
+			select {
+			case <-received:
+			case <-time.After(10 * time.Second):
+				t.Fatal("identity request did not reach server")
+			}
+			select {
+			case got := <-done:
+				if got.err != nil || got.action != EnsureNoop || !got.status.Live || got.status.PID != os.Getpid() {
+					t.Fatalf("delayed identity = %+v; want recognized live daemon without lifecycle action", got)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("identity probe did not finish within its bounded wait")
+			}
+		})
+	}
+}
+
+// serveDaemonIdentityReply tolerates the connection-only availability probe,
+// then handles one identity request. Cleanup waits for the server to exit.
+func serveDaemonIdentityReply(t *testing.T, socket string, reply func(net.Conn) error) <-chan struct{} {
+	t.Helper()
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				done <- err
+				return
+			}
+			_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+			var req daemonapi.Request
+			err = json.NewDecoder(conn).Decode(&req)
+			if errors.Is(err, io.EOF) {
+				_ = conn.Close()
+				continue
+			}
+			if err == nil && req.Type != daemonapi.RequestDaemonInfo {
+				err = fmt.Errorf("unexpected request type %q", req.Type)
+			}
+			if err == nil {
+				close(received)
+				err = reply(conn)
+			}
+			_ = conn.Close()
+			done <- err
+			return
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, net.ErrClosed) {
+				t.Errorf("identity server: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("identity server did not exit")
+		}
+	})
+	return received
+}
+
+func TestEnsureCurrentPreservesUnknownDaemon(t *testing.T) {
+	for _, failure := range []string{"timeout", "permission", "protocol"} {
+		for _, live := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/live=%t", failure, live), func(t *testing.T) {
+				dir := t.TempDir()
+				paths := Paths{
+					PIDFile:    filepath.Join(dir, "daemon.pid"),
+					SocketFile: shortTestSocketPath(t),
+					StdoutLog:  filepath.Join(dir, "out.log"),
+					// A mistaken start creates stdout, then fails safely before
+					// it can launch a real child.
+					StderrLog: dir,
+					PlistFile: filepath.Join(dir, "daemon.plist"),
+				}
+				pid := stalePID
+				if live {
+					pid = os.Getpid()
+				}
+				if err := WritePIDFile(paths.PIDFile, pid); err != nil {
+					t.Fatal(err)
+				}
+				if err := WriteMetadata(paths, pid, "preserve-me"); err != nil {
+					t.Fatal(err)
+				}
+				before := make(map[string][]byte)
+				for _, path := range []string{paths.PIDFile, MetadataPath(paths)} {
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					before[path] = data
+				}
+				var cause error
+				if failure == "protocol" {
+					serveDaemonIdentityReply(t, paths.SocketFile, func(conn net.Conn) error {
+						_, err := io.WriteString(conn, "not a weft protocol response\n")
+						return err
+					})
+				} else {
+					listener, err := net.Listen("unix", paths.SocketFile)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = listener.Close() })
+					cause = os.ErrDeadlineExceeded
+					if failure == "permission" {
+						cause = syscall.EACCES
+					}
+					oldDial := dialSocketTimeout
+					dialSocketTimeout = func(string, string, time.Duration) (net.Conn, error) {
+						return nil, cause
+					}
+					t.Cleanup(func() { dialSocketTimeout = oldDial })
+				}
+				socketBefore, err := os.Lstat(paths.SocketFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				oldRestart := restartForEnsure
+				restarts := 0
+				restartForEnsure = func(Paths, time.Duration, time.Duration) (Status, error) {
+					restarts++
+					return Status{}, errors.New("unexpected restart")
+				}
+				t.Cleanup(func() { restartForEnsure = oldRestart })
+
+				_, action, err := EnsureCurrent(paths, 2*time.Second)
+				var probeErr *IdentityProbeError
+				if !errors.As(err, &probeErr) || action != EnsureNoop {
+					t.Fatalf("unknown identity = action %q, error %v; want probe failure without action", action, err)
+				}
+				if cause != nil && !errors.Is(err, cause) {
+					t.Errorf("probe error lost underlying cause: %v", err)
+				}
+				if restarts != 0 {
+					t.Errorf("unknown identity triggered %d restarts", restarts)
+				}
+				for path, want := range before {
+					got, err := os.ReadFile(path)
+					if err != nil || !bytes.Equal(got, want) {
+						t.Errorf("unknown identity changed %s: %q, %v", path, got, err)
+					}
+				}
+				socketAfter, err := os.Lstat(paths.SocketFile)
+				if err != nil || !os.SameFile(socketBefore, socketAfter) {
+					t.Errorf("unknown identity removed or replaced socket: %v", err)
+				}
+				if _, err := os.Stat(paths.StdoutLog); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("unknown identity attempted daemon start: stdout log stat = %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestEnsureCurrentStartFailureIsNotProbeFailure(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{
+		PIDFile:    filepath.Join(dir, "daemon.pid"),
+		SocketFile: filepath.Join(dir, "daemon.sock"),
+		PlistFile:  filepath.Join(dir, "daemon.plist"),
+		StdoutLog:  dir, // Opening a directory for append fails before spawning.
+	}
+	_, action, err := EnsureCurrent(paths, time.Second)
+	var probeErr *IdentityProbeError
+	if !errors.Is(err, syscall.EISDIR) || errors.As(err, &probeErr) || action != EnsureNoop {
+		t.Fatalf("start failure = action %q, error %v; want lifecycle failure, not identity uncertainty", action, err)
 	}
 }
 
