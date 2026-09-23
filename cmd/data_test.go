@@ -620,3 +620,22 @@ func TestIsValidDataFetchHostAllowsLocalhost(t *testing.T) {
 		t.Fatal("localhost should be accepted as a special-case fetch target")
 	}
 }
+
+// An unconfigured host must get an untyped nil store so the callers'
+// "R2 is not configured" guards fire instead of a nil-receiver panic (wb172).
+func TestR2StoreBuildersReturnUntypedNilWhenUnconfigured(t *testing.T) {
+	client, err := dataPublishBuildR2Client(&config.Config{})
+	if err != nil {
+		t.Fatalf("dataPublishBuildR2Client: %v", err)
+	}
+	if client != nil {
+		t.Fatalf("dataPublishBuildR2Client returned non-nil %T for an unconfigured host", client)
+	}
+	store, err := buildRunPayloadObjectStore()
+	if err != nil {
+		t.Fatalf("buildRunPayloadObjectStore: %v", err)
+	}
+	if store != nil {
+		t.Fatalf("buildRunPayloadObjectStore returned non-nil %T for an unconfigured host", store)
+	}
+}

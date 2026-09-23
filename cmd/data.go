@@ -145,7 +145,14 @@ Examples:
 
 var (
 	dataPublishBuildR2Client = func(cfg *config.Config) (dataPublishR2Client, error) {
-		return buildR2Client(cfg)
+		client, err := buildR2Client(cfg)
+		if err != nil || client == nil {
+			// Return an untyped nil: a nil *r2.Client wrapped in the
+			// interface is non-nil, so the caller's "R2 is not configured"
+			// guard would pass and the upload would dereference it (wb172).
+			return nil, err
+		}
+		return client, nil
 	}
 	dataPublishCopyFrom       = ssh.CopyFromWithRetry
 	dataPublishDigestFromHost = dataloc.DigestPathOnHost

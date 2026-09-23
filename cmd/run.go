@@ -194,7 +194,13 @@ var buildRunPayloadObjectStore = func() (runPayloadObjectStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buildR2Client(cfg)
+	client, err := buildR2Client(cfg)
+	if err != nil || client == nil {
+		// Untyped nil so the caller's "R2 is not configured" guard fires;
+		// a nil *r2.Client in the interface would not compare equal to nil.
+		return nil, err
+	}
+	return client, nil
 }
 
 func parseRunPayloadDeclarations(values []string) ([]runPayloadDeclaration, error) {
