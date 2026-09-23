@@ -32,33 +32,55 @@ func TestRunCommandWithTimeoutKillsProcessGroup(t *testing.T) {
 	}
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// Cancel only once the background child exists, so the test measures the
+	// process-group kill rather than racing a deadline against sh's startup.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	errc := make(chan error, 1)
+	go func() {
+		_, err := runCommandWithTimeout(ctx, "sh", []string{"-c", "sleep 600 & echo $! > " + pidFile + "; wait"}, outputCombined)
+		errc <- err
+	}()
 
-	_, err := runCommandWithTimeout(ctx, "sh", []string{"-c", "sleep 60 & echo $! > " + pidFile + "; wait"}, outputCombined)
-	if err == nil {
-		t.Fatal("runCommandWithTimeout returned nil error for timed-out command")
-	}
-	data, readErr := os.ReadFile(pidFile)
-	if readErr != nil {
-		t.Fatalf("read child pid: %v", readErr)
-	}
-	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
-	if parseErr != nil {
-		t.Fatalf("parse child pid: %v", parseErr)
-	}
+	pid := waitForPIDFile(t, pidFile, 60*time.Second)
 	t.Cleanup(func() {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	})
+	cancel()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("runCommandWithTimeout returned nil error for a cancelled command")
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("runCommandWithTimeout did not return after cancellation")
+	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(pid) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("child process %d survived command timeout", pid)
+	t.Fatalf("child process %d survived command cancellation", pid)
+}
+
+// waitForPIDFile polls until path holds a complete PID; the shell truncates
+// the file before writing it, so an empty read means "not yet".
+func waitForPIDFile(t *testing.T, path string, limit time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child pid file %s never appeared", path)
+	return 0
 }
 
 func processAlive(pid int) bool {

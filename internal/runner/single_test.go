@@ -476,16 +476,21 @@ func TestRunSingleJob_DirenvEnvAppliedAndJobEnvOverrides(t *testing.T) {
 }
 
 func TestRunSingleJob_WallTimeStopsRunAndMarksCommandStart(t *testing.T) {
+	skipSlowInShort(t)
 	logDir := t.TempDir()
+	// The wall budget counts setup, so it must comfortably exceed setup on a
+	// loaded machine (a 100 ms budget expired before the command started),
+	// while the command must outlast it by far: the property is that a
+	// deadline reached during the command stops it, not how fast.
 	cfg := SingleJobConfig{
 		JobID: 52,
 		Job: opsqueue.CommandJob{
-			Cmd: "sleep 2",
+			Cmd: "sleep 600",
 		},
 		LogDir:         logDir,
 		WorkingDir:     t.TempDir(),
 		SampleInterval: 20 * time.Millisecond,
-		WallTime:       100 * time.Millisecond,
+		WallTime:       5 * time.Second,
 		SkipProbes:     true,
 	}
 
@@ -494,8 +499,8 @@ func TestRunSingleJob_WallTimeStopsRunAndMarksCommandStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunSingleJob: %v", err)
 	}
-	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("wall deadline took %v, want less than 1s", elapsed)
+	if elapsed := time.Since(started); elapsed >= 300*time.Second {
+		t.Fatalf("wall deadline took %v; the command ran to completion instead of being stopped", elapsed)
 	}
 	if ei.ExitCode != 124 {
 		t.Fatalf("exit code = %d, want 124", ei.ExitCode)
