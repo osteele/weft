@@ -26,7 +26,8 @@ CUDA/driver floor, max-merged across the scripts a command references; a
 range with no determinable release line takes the newest-torch CUDA floor
 (`dataloc.OpenEndedTorchCUDAFloor`). `dataloc.ScanCommandPythonEnvs` splits the
 command into steps at unquoted shell operators (quotes and escapes are
-honoured, so `echo 'a; b'` is one step) and classifies
+honoured, so `echo 'a; b'` is one step, while the body of a double-quoted
+`"$(...)"` or backtick substitution is scanned as further steps) and classifies
 each step: a direct `uv run script.py` of a PEP 723 script runs that
 script's environment; `uv run python ...`, `uv run <tool>`, bare `python ...`,
 and any executable not known to be non-Python run in the project environment;

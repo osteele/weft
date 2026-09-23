@@ -23,7 +23,9 @@ func DirectUVRunPEP723Script(dir, command string) string {
 // ", \ and newline; an unquoted backslash escapes the next character, and
 // backslash-newline continues the line. An unquoted # starting a word begins a
 // comment. `&` in a redirection (2>&1, &>) is not an operator. Command
-// substitution inside double quotes is not parsed. Empty steps are omitted.
+// substitutions inside double quotes ("$(...)", "`...`") execute, so their
+// bodies are split recursively and their steps included; the substitution
+// text stays in the enclosing word. Empty steps are omitted.
 func shellSteps(command string) [][]string {
 	var steps [][]string
 	var words []string
@@ -70,6 +72,11 @@ func shellSteps(command string) [][]string {
 					if command[i] == '\n' {
 						continue
 					}
+				} else if body, end, ok := quotedSubstitution(command, i); ok {
+					steps = append(steps, shellSteps(body)...)
+					word.WriteString(command[i:end])
+					i = end - 1
+					continue
 				}
 				word.WriteByte(command[i])
 			}
@@ -91,6 +98,65 @@ func shellSteps(command string) [][]string {
 	}
 	endStep()
 	return steps
+}
+
+// quotedSubstitution recognizes a command substitution starting at command[i]
+// inside double quotes: `$(` through its matching `)`, or a backtick through
+// the next unescaped backtick. It returns the body and the index just past the
+// substitution; an unterminated substitution extends to the end of command.
+// Arithmetic expansion `$((...))` runs no command and is not recognized.
+func quotedSubstitution(command string, i int) (body string, end int, ok bool) {
+	switch {
+	case command[i] == '`':
+		for j := i + 1; j < len(command); j++ {
+			switch command[j] {
+			case '\\':
+				j++
+			case '`':
+				return command[i+1 : j], j + 1, true
+			}
+		}
+		return command[i+1:], len(command), true
+	case command[i] == '$' && strings.HasPrefix(command[i+1:], "(") && !strings.HasPrefix(command[i+1:], "(("):
+		start := i + 2
+		if j := matchingParen(command, start); j < len(command) {
+			return command[start:j], j + 1, true
+		}
+		return command[start:], len(command), true
+	}
+	return "", 0, false
+}
+
+// matchingParen returns the index of the `)` closing a parenthesis opened just
+// before command[start], skipping quoted text and escapes, or len(command).
+func matchingParen(command string, start int) int {
+	depth := 1
+	for j := start; j < len(command); j++ {
+		switch command[j] {
+		case '\\':
+			j++
+		case '\'':
+			if k := strings.IndexByte(command[j+1:], '\''); k >= 0 {
+				j += k + 1
+			} else {
+				return len(command)
+			}
+		case '"':
+			for j++; j < len(command) && command[j] != '"'; j++ {
+				if command[j] == '\\' {
+					j++
+				}
+			}
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return len(command)
 }
 
 // isRedirectionAmpersand reports whether the unquoted & at command[i] belongs

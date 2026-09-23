@@ -110,6 +110,24 @@ func TestScriptTorchFloorsIgnoreQuotedOperators(t *testing.T) {
 	}
 }
 
+// A command substitution inside double quotes executes, so a project-env
+// Python step hidden there still adds the project wheel's 12.8 floor.
+func TestScriptTorchFloorsIncludeQuotedSubstitutionSteps(t *testing.T) {
+	dir, _ := writeScriptTorchProject(t, "torch>=2.2,<2.7")
+	writeScript(t, filepath.Join(dir, "scripts", "prep.py"), "import torch\n")
+	command := `echo "$(true; uv run python scripts/prep.py)" && uv run scripts/exp.py`
+
+	for _, mode := range []RuntimeFloorMode{RuntimeFloorExact, RuntimeFloorFamily} {
+		runtime, err := ResolveEffectiveRuntime(dir, command, EffectiveRuntimeOptions{FloorMode: mode})
+		if err != nil {
+			t.Fatalf("ResolveEffectiveRuntime mode %d: %v", mode, err)
+		}
+		if runtime.Floor.Req.MinCUDAVersion != "12.8" {
+			t.Errorf("mode %d MinCUDAVersion = %q, want 12.8 from the substituted project torch step", mode, runtime.Floor.Req.MinCUDAVersion)
+		}
+	}
+}
+
 func TestScriptTorchOpenRangeKeepsLatestTorchFloor(t *testing.T) {
 	dir, command := writeScriptTorchProject(t, "torch>=2.2")
 

@@ -114,6 +114,26 @@ func TestResolveJobTorchMaxComputeCapForPersistence_ScriptTorchBound(t *testing.
 			map[string]string{"prep.py": "", "second.py": torch291},
 			`echo 'ok'; python scripts/prep.py && uv run scripts/second.py`, "9.0",
 		},
+		{
+			"double-quoted $() substitution runs its steps", "2.6.0",
+			map[string]string{"prep.py": "", "second.py": torch291},
+			`echo "$(true; uv run python scripts/prep.py)" && uv run scripts/second.py`, "9.0",
+		},
+		{
+			"double-quoted backtick substitution runs its steps", "2.6.0",
+			map[string]string{"prep.py": "", "second.py": torch291},
+			"echo \"`python scripts/prep.py`\" && uv run scripts/second.py", "9.0",
+		},
+		{
+			"double-quoted text without a substitution stays neutral", "2.6.0",
+			map[string]string{"second.py": torch291},
+			"echo \"cost \\$(python x) \\`python y\\`; $((1+2))\" && uv run scripts/second.py", "12.0",
+		},
+		{
+			"single-quoted substitution is literal", "2.6.0",
+			map[string]string{"second.py": torch291},
+			`echo '$(python x)' && uv run scripts/second.py`, "12.0",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
