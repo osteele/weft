@@ -352,6 +352,7 @@ Supported keys (all optional):
 | `gpu-mem`   | int or `">=NGB"` | `--gpu-mem`         |
 | `gpu-mem-strict` | bool       | `--gpu-mem-strict`  |
 | `interconnect` | string (`any`, `pcie`, `nvlink`, `nvlink-uniform`) | `--interconnect` |
+| `platform` | string (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`) | `--platform` |
 | `cpu-cores` | int             | `--cpu-cores`       |
 | `disk` / `disk-gb` | int or `"NGB"` | `--disk`      |
 | `runtime-disk` / `runtime-disk-gb` | int or `"NGB"` | `--runtime-disk` |

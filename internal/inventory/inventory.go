@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/config"
 )
 
@@ -123,6 +124,13 @@ type HostSpec struct {
 	Benchmark           BenchmarkGateSpec `yaml:"benchmark,omitempty"`
 	Capabilities        []string          `yaml:"capabilities,omitempty"`
 	AgentConcurrency    map[string]int    `yaml:"agent_concurrency,omitempty"`
+}
+
+// Platform returns the canonical execution platform, or empty when inventory
+// does not establish both a supported OS and architecture.
+func (h HostSpec) Platform() string {
+	value, _ := compat.NormalizePlatform(h.OS + "/" + h.Arch)
+	return value
 }
 
 // BenchmarkGateSpec configures how quiet a host must be before benchmark jobs start.

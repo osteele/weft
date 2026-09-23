@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/artifactspec"
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
@@ -118,6 +119,7 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 		GPUCount:                    job.RequestedGPUCount(),
 		GPUMemGB:                    job.GPUMemGB,
 		Interconnect:                job.RequestedInterconnect(),
+		Platform:                    job.RequestedPlatform(),
 		CPUCores:                    job.RequestedCPUCores(),
 		CPUReserveCores:             job.RequestedCPUReserveCores(),
 		RAMReservationKB:            jobRAMReservationKB(job),
@@ -277,6 +279,7 @@ type QueueJobParams struct {
 	GPUCount        int    // Exact GPU count requested on this host
 	GPUMemGB        *int   // GPU memory reservation in GB per device
 	Interconnect    string
+	Platform        string
 	CPUCores        int
 	CPUReserveCores int    // absolute cores; normalized to a percent of the destination host at dispatch
 	SetupPolicy     string // "" = auto-detect target setup, "none" = the job owns its environment
@@ -342,6 +345,22 @@ func MirrorQueuedJobWithID(database *sql.DB, jobID int64, params QueueJobParams)
 func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64, params QueueJobParams, explicitID, draft bool) (int64, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	platform := params.Platform
+	if platform == "" && params.CLIOverrides != nil {
+		platform = params.CLIOverrides.Platform
+	}
+	if platform != "" {
+		normalized, err := compat.NormalizePlatform(platform)
+		if err != nil {
+			return 0, err
+		}
+		overrides := db.CLIResourceOverrides{}
+		if params.CLIOverrides != nil {
+			overrides = *params.CLIOverrides
+		}
+		overrides.Platform = normalized
+		params.CLIOverrides = &overrides
 	}
 	if strings.TrimSpace(params.Host) == "" && strings.TrimSpace(params.WorkingDir) == "" {
 		return 0, fmt.Errorf("cloud jobs require a local working directory; run from a configured automap directory or pass --dir")

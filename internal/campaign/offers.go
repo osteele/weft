@@ -39,6 +39,8 @@ func parseCUDAVersionFloat(s string) float64 {
 // eliminated everything).
 type OfferFilterStats struct {
 	RawCount          int // offers returned by provider search
+	AfterPlatform     int // remaining after execution OS/architecture requirements
+	PlatformFiltered  int
 	AfterSKUMemory    int // remaining after exact SKU memory filter
 	AfterVRAM         int // remaining after VRAM requirement filter
 	AfterGPUCount     int // remaining after GPU count requirement filter
@@ -112,6 +114,7 @@ func (s OfferFilterStats) KeptCount() int {
 		s.AfterSurvival, s.AfterHourlyRate, s.AfterTorchArch, s.AfterForward,
 		s.AfterProvider, s.AfterCUDA, s.AfterInterconnect, s.AfterHostRAM,
 		s.AfterGPUCount, s.AfterVRAM, s.AfterSKUMemory,
+		s.AfterPlatform,
 	} {
 		if stage > 0 {
 			return stage
@@ -125,6 +128,9 @@ func (s OfferFilterStats) KeptCount() int {
 // predicates that were searched — note that it reports what was asked for, not
 // which predicate bound.
 func (s OfferFilterStats) NoOffersDetail(constraints string) string {
+	if s.PlatformFiltered > 0 && s.AfterPlatform == 0 {
+		return fmt.Sprintf("%d offers rejected by required execution platform", s.PlatformFiltered)
+	}
 	if s.RawCount == 0 {
 		if len(s.ProviderErrors) > 0 {
 			detail := strings.Join(s.ProviderErrors, "; ")
@@ -245,6 +251,7 @@ func (s OfferFilterStats) rejectionStageDetails() []string {
 		}
 	}
 	appendDetail(s.SKUMemoryFiltered, fmt.Sprintf("exact SKU memory %dGB", s.SKUMemoryRequestedGB))
+	appendDetail(s.PlatformFiltered, "execution platform")
 	if s.VRAMFiltered > 0 && s.BestRejectedVRAMGB > 0 && s.VRAMRequestedGB > 0 {
 		appendDetail(s.VRAMFiltered, fmt.Sprintf("VRAM (best %.0fGB < required %dGB)", s.BestRejectedVRAMGB, s.VRAMRequestedGB))
 	} else {
@@ -322,6 +329,9 @@ func FormatOfferConstraints(c cloud.OfferConstraints) string {
 	var parts []string
 	if c.GPUClass != "" {
 		parts = append(parts, "gpu="+c.GPUClass)
+	}
+	if c.Platform != "" {
+		parts = append(parts, "platform="+c.Platform)
 	}
 	if c.MinGPUMemGB > 0 {
 		parts = append(parts, fmt.Sprintf("vram>=%dGB", c.MinGPUMemGB))
@@ -459,6 +469,7 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 		MinCUDAVersion:   group.MinCUDAVersion,
 		NumGPUs:          requiredGPUCountForGroup(group),
 		Interconnect:     strings.TrimSpace(group.Interconnect),
+		Platform:         group.Platform,
 		RunpodCloudType:  strings.TrimSpace(group.RunpodCloudType),
 		// Legacy GPU memory upper metadata is intentionally not passed to search.
 		// Offer selection relies on cost/runtime scoring after the hard
@@ -768,6 +779,7 @@ var axisEnforcement = map[cloud.Provider]map[cloud.ConstraintAxis]axisEnforcemen
 		cloud.AxisNumGPUs:      {checkedLocally, "filterOffersByGPUCount"},
 		cloud.AxisHostRAM:      {checkedLocally, "filterOffersByHostRAM"},
 		cloud.AxisInterconnect: {checkedLocally, "filterOffersByInterconnect"},
+		cloud.AxisPlatform:     {checkedLocally, "filterOffersByPlatform against the provider agent execution contract"},
 		cloud.AxisCUDA:         {checkedLocally, "filterOffersByCUDACompat"},
 		cloud.AxisDriver:       {checkedLocally, "filterOffersByProviderCompatibility / ForwardCompatDriver"},
 
@@ -785,6 +797,7 @@ var axisEnforcement = map[cloud.Provider]map[cloud.ConstraintAxis]axisEnforcemen
 		cloud.AxisNumGPUs:      {checkedLocally, "filterOffersByGPUCount"},
 		cloud.AxisHostRAM:      {checkedLocally, "filterOffersByHostRAM"},
 		cloud.AxisInterconnect: {checkedLocally, "filterOffersByInterconnect"},
+		cloud.AxisPlatform:     {checkedLocally, "filterOffersByPlatform against the provider agent execution contract"},
 		cloud.AxisCUDA:         {checkedLocally, "filterOffersByCUDACompat"},
 		cloud.AxisDriver:       {checkedLocally, "filterOffersByProviderCompatibility; RunPod exposes no driver on the type list, so compatibility is also probed after launch"},
 
@@ -1048,6 +1061,8 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 //
 // Returns the surviving offers and whether any remain.
 func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *OfferFilterStats, survivalModel *bidding.SurvivalModel, minSurvival float64) ([]cloud.Offer, bool) {
+	offers, st.PlatformFiltered = filterOffersByPlatform(group, offers)
+	st.AfterPlatform = len(offers)
 	offers, _ = FilterOffersByAuthorizedTargets(group, offers)
 	if len(offers) == 0 {
 		return offers, false
@@ -1627,11 +1642,11 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 // predicate on Vast.ai shared across groups differing only in --cpu-mem).
 // TestConstraintKeyCoversEveryConstraintField pins the coverage.
 func constraintKey(c cloud.OfferConstraints, provider cloud.Provider) string {
-	return fmt.Sprintf("%s/%d/%d/%d/%s/%.2f/%d/%d/%d/%s/%s/%s/%s/%s",
+	return fmt.Sprintf("%s/%d/%d/%d/%s/%.2f/%d/%d/%d/%s/%s/%s/%s/%s/%s",
 		c.GPUClass, c.MinGPUMemGB, c.MinDiskGB,
 		normalizedGPUCount(c.NumGPUs), c.Interconnect, c.MinReliability,
 		c.MinCPUCoresEffective, c.MinHostRAMGB, c.MinDriverVersion, c.MinCUDAVersion,
-		c.InstanceType, c.RunpodCloudType, sortedGeos(c.ExcludeGeos), provider)
+		c.InstanceType, c.RunpodCloudType, sortedGeos(c.ExcludeGeos), provider, c.Platform)
 }
 
 // sortedGeos returns the canonical comma-joined form of a geo exclusion list.

@@ -1493,6 +1493,7 @@ func resetRunGlobals(t *testing.T) {
 	runGPUMem = 0
 	runGPUMemStrict = false
 	runInterconnect = ""
+	runPlatform = ""
 	runCPUCores = 0
 	runCPUReserve = 0
 	runCPUMem = 0

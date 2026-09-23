@@ -334,6 +334,14 @@ func (j *Job) RequestedInterconnect() string {
 	return strings.TrimSpace(j.CLIResourceOverrides.Interconnect)
 }
 
+// RequestedPlatform returns the persisted workload OS/architecture requirement.
+func (j *Job) RequestedPlatform() string {
+	if j == nil || j.CLIResourceOverrides == nil {
+		return ""
+	}
+	return j.CLIResourceOverrides.Platform
+}
+
 // RequestedCPUCores returns the explicit minimum CPU core/vCPU floor.
 func (j *Job) RequestedCPUCores() int {
 	if j == nil || j.CLIResourceOverrides == nil || j.CLIResourceOverrides.CPUCores == nil {
@@ -410,6 +418,7 @@ type CLIResourceOverrides struct {
 	GPUMemGB           *int     `json:"gpu_mem_gb,omitempty"`
 	GPUMemStrict       *bool    `json:"gpu_mem_strict,omitempty"`
 	Interconnect       string   `json:"interconnect,omitempty"`
+	Platform           string   `json:"platform,omitempty"`
 	CPUCores           *int     `json:"cpu_cores,omitempty"`
 	CPUMemGB           *int     `json:"cpu_mem_gb,omitempty"`
 	CPUMemStrict       *bool    `json:"cpu_mem_strict,omitempty"`
@@ -1794,7 +1803,7 @@ func SetJobCLIResourceOverrides(db dbExecer, jobID int64, snap *CLIResourceOverr
 // IsEmpty reports whether no fields are populated.
 func (o *CLIResourceOverrides) IsEmpty() bool {
 	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUCount == nil &&
-		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.CPUCores == nil &&
+		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.Platform == "" && o.CPUCores == nil &&
 		o.CPUMemGB == nil && o.CPUMemStrict == nil &&
 		o.DiskGB == nil && o.DiskMaxGB == nil && o.RuntimeDiskGB == nil &&
 		o.MaxHourlyRateCents == nil && o.MaxSpendCents == nil && o.MaxTimeSeconds == nil &&

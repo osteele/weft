@@ -26,7 +26,7 @@ func TestDerivedAxesAreDeclaredConstants(t *testing.T) {
 	declared := NewAxisSet(
 		AxisGPUVariant, AxisGPUSKU, AxisGPUMemory, AxisNumGPUs, AxisDisk,
 		AxisHostRAM, AxisCPUCores, AxisReliability, AxisDriver, AxisCUDA,
-		AxisInterconnect, AxisGeo, AxisInstanceType, AxisCloudType,
+		AxisInterconnect, AxisPlatform, AxisGeo, AxisInstanceType, AxisCloudType,
 	)
 	for _, axis := range AllConstraintAxes() {
 		if !declared.Has(axis) {

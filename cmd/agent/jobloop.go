@@ -1572,6 +1572,7 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 			GPUCount:        job.GPUCount,
 			GPUMem:          gpuMem,
 			Interconnect:    job.Interconnect,
+			Platform:        job.Platform,
 			CPUCores:        job.CPUCores,
 			WallTimeSeconds: job.WallTimeSeconds,
 			OutputDirs:      append([]string(nil), job.OutputDirs...),

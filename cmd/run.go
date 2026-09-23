@@ -22,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
@@ -126,6 +127,7 @@ var (
 	runGPUMem                   int
 	runGPUMemStrict             bool
 	runInterconnect             string
+	runPlatform                 string
 	runCPUCores                 int
 	runCPUReserve               int
 	runSetupPolicy              string
@@ -572,6 +574,7 @@ func init() {
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
 	runCmd.Flags().BoolVar(&runGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	runCmd.Flags().StringVar(&runInterconnect, "interconnect", "", "Multi-GPU interconnect requirement: any, pcie, nvlink (present), or nvlink-uniform (every GPU pair)")
+	runCmd.Flags().StringVar(&runPlatform, "platform", "", "Required workload OS/architecture (e.g. linux/amd64 or darwin/arm64)")
 	runCmd.Flags().Bool("nvlink-required", false, "Alias for --interconnect=nvlink")
 	runCmd.Flags().Bool("same-host", false, "Require all requested GPUs on one host (default for --gpus)")
 	runCmd.Flags().IntVar(&runCPUCores, "cpu-cores", 0, "Minimum effective CPU cores/vCPUs for rental placement")
@@ -796,6 +799,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if runInterconnect == "" {
 			runInterconnect = fromJob.RequestedInterconnect()
+		}
+		if !cmd.Flags().Changed("platform") && runPlatform == "" {
+			runPlatform = fromJob.RequestedPlatform()
 		}
 		if runCPUCores == 0 {
 			runCPUCores = fromJob.RequestedCPUCores()
@@ -1068,6 +1074,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runInterconnect = meta.Interconnect
 			applied = append(applied, fmt.Sprintf("interconnect=%s", meta.Interconnect))
 		}
+		if !cmd.Flags().Changed("platform") && runPlatform == "" && meta.Platform != "" {
+			runPlatform = meta.Platform
+			applied = append(applied, "platform="+meta.Platform)
+		}
 		if !cmd.Flags().Changed("cpu-cores") && runCPUCores == 0 && meta.CPUCores > 0 {
 			runCPUCores = meta.CPUCores
 			applied = append(applied, fmt.Sprintf("cpu-cores=%d", meta.CPUCores))
@@ -1266,6 +1276,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	var normalizeErr error
+	if cmd.Flags().Changed("platform") && strings.TrimSpace(runPlatform) == "" {
+		return fmt.Errorf("--platform requires a nonempty OS/architecture")
+	}
+	runPlatform, normalizeErr = compat.NormalizePlatform(runPlatform)
+	if normalizeErr != nil {
+		return normalizeErr
+	}
+	cliOverrides.Platform = runPlatform
 	runInterconnect, normalizeErr = normalizeInterconnect(runInterconnect)
 	if normalizeErr != nil {
 		return normalizeErr
@@ -1434,6 +1452,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		CPUCores:             runCPUCores,
 		CPUMemGB:             db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
 		Interconnect:         runInterconnect,
+		Platform:             runPlatform,
 		Inputs:               runInputs,
 		Command:              command,
 		Project:              projectName,
@@ -1561,6 +1580,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			EnvVars:          runEnvVars,
 			Tags:             runTags,
 			GPUClass:         gpuClass,
+			Platform:         runPlatform,
 			GPUMemGB:         resolvedGPUMemGB,
 			GPUMemMaxGB:      resolvedGPUMemMaxGB,
 			DepSpec:          encodeQueueDependencies(buildRunDependencies()),
@@ -2101,6 +2121,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			CPUCores:                    runCPUCores,
 			CPUMemGB:                    db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
 			Interconnect:                runInterconnect,
+			Platform:                    runPlatform,
 			Dependencies:                deps,
 			CPUReserveCores:             runCPUReserve,
 			SetupPolicy:                 runSetupPolicy,

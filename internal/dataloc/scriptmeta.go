@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/osteele/weft/internal/compat"
 	toml "github.com/pelletier/go-toml"
 )
 
@@ -19,6 +20,7 @@ type ScriptMeta struct {
 	GPUMemGB      int    // Requested GPU memory in GB (headroom may be applied by CLI)
 	GPUMemStrict  *bool  // Exact gpu-mem matching (no headroom), when explicitly set
 	Interconnect  string // Requested intra-host interconnect; see placement.InterconnectValues
+	Platform      string // Required workload OS/architecture
 	CPUCores      int    // Minimum effective CPU cores/vCPUs
 	CPUMemGB      int    // Minimum host/system RAM in GB (headroom may be applied by CLI)
 	CPUMemStrict  *bool  // Exact cpu-mem matching (no headroom), when explicitly set
@@ -65,7 +67,7 @@ type ScriptMeta struct {
 // for any deps-only script.
 func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUCount == 0 && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
-		m.Interconnect == "" && m.CPUCores == 0 && m.CPUMemGB == 0 && m.CPUMemStrict == nil &&
+		m.Interconnect == "" && m.Platform == "" && m.CPUCores == 0 && m.CPUMemGB == 0 && m.CPUMemStrict == nil &&
 		m.DiskGB == 0 && m.DiskMaxGB == 0 && m.RuntimeDiskGB == 0 && m.WallTime == "" &&
 		m.GPUArchMax == "" && m.GPUIdleTimeout == "" && m.StdoutSilenceTimeout == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
@@ -116,6 +118,16 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			}
 			if v, ok := wt.Get("interconnect").(string); ok {
 				meta.Interconnect = strings.TrimSpace(v)
+			}
+			if value := wt.Get("platform"); value != nil {
+				raw, ok := value.(string)
+				if !ok || strings.TrimSpace(raw) == "" {
+					return nil, fmt.Errorf("script metadata platform must be a nonempty OS/architecture string")
+				}
+				meta.Platform, err = compat.NormalizePlatform(raw)
+				if err != nil {
+					return nil, fmt.Errorf("script metadata: %w", err)
+				}
 			}
 			meta.CPUCores = parsePositiveInt(firstPresent(wt, "cpu-cores", "cpu_cores"))
 			meta.CPUMemGB = parseDiskGB(firstPresent(wt, "cpu-mem", "cpu-mem-gb", "cpu_mem_gb"))

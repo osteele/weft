@@ -67,6 +67,7 @@ type QueueEntry struct {
 	GPUCount         int
 	GPUMemGB         *int
 	Interconnect     string
+	Platform         string
 	CPUCores         int
 	CPUReserveCores  int
 	RAMReservationKB int64

@@ -18,6 +18,7 @@ import (
 type TargetSpec struct {
 	Name              string
 	Provider          string
+	Platform          string
 	Devices           []TargetDevice
 	Cordoned          bool
 	CordonReason      string
@@ -106,6 +107,7 @@ const (
 	ReasonCPUCores         EligibilityReasonKind = "cpu_cores"
 	ReasonHostRAM          EligibilityReasonKind = "host_ram"
 	ReasonInterconnect     EligibilityReasonKind = "interconnect"
+	ReasonPlatform         EligibilityReasonKind = "platform"
 	ReasonCapability       EligibilityReasonKind = "host_capability"
 	ReasonCapabilityBusy   EligibilityReasonKind = "host_capability_busy"
 	ReasonAuthorizedTarget EligibilityReasonKind = "authorized_target"
@@ -128,6 +130,7 @@ func (v Verdict) Messages() []string {
 func TargetSpecFromHostSpec(host inventory.HostSpec, metrics *HostMetrics, reservations []GPUReservation) TargetSpec {
 	t := TargetSpec{
 		Name:                            host.Name,
+		Platform:                        host.Platform(),
 		Devices:                         make([]TargetDevice, 0, len(host.GPUs)),
 		Reservations:                    slices.Clone(reservations),
 		ReservationsKnown:               reservations != nil,
@@ -242,6 +245,19 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	}
 	if t.OptInOnly && !t.ExplicitlyNamed {
 		return fail(ReasonOptInOnly, "host is opt-in only (specify with --host)", 0, 0)
+	}
+	if c.Platform != "" {
+		required, err := compat.NormalizePlatform(c.Platform)
+		if err != nil {
+			return fail(ReasonPlatform, err.Error(), 0, 0)
+		}
+		actual, err := compat.NormalizePlatform(t.Platform)
+		if err != nil || actual == "" {
+			return fail(ReasonPlatform, fmt.Sprintf("target platform unknown; requires %s", required), 0, 0)
+		}
+		if actual != required {
+			return fail(ReasonPlatform, fmt.Sprintf("target platform %s does not match required %s", actual, required), 0, 0)
+		}
 	}
 	if len(c.AuthorizedTargets) > 0 {
 		allowed := slices.ContainsFunc(c.AuthorizedTargets, func(name string) bool {

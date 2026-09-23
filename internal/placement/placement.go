@@ -67,6 +67,7 @@ type Constraints struct {
 	CPUCores             int      `enforce:"cpu_cores"`    // Minimum effective CPU cores/vCPUs
 	CPUMemGB             int      `enforce:"host_ram"`     // Minimum host/system RAM in GB (effective, headroom applied); 0 = no minimum
 	Interconnect         string   `enforce:"interconnect"` // Requested intra-host interconnect; see InterconnectValues
+	Platform             string   `enforce:"platform"`     // Required workload OS/architecture; empty = unconstrained
 	Inputs               []string `enforce:"-"`            // Asset refs the job reads (for locality scoring)
 	Command              string   `enforce:"-"`            // For predictor-based scoring; empty = skip
 	Project              string   `enforce:"-"`            // For predictor-based scoring; empty = skip
@@ -139,6 +140,7 @@ type ConstraintSource struct {
 	CPUCores               int
 	CPUMemGB               int
 	Interconnect           string
+	Platform               string
 	Inputs                 []string
 	Command                string
 	Project                string
@@ -177,6 +179,7 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 		CPUCores:             src.CPUCores,
 		CPUMemGB:             src.CPUMemGB,
 		Interconnect:         src.Interconnect,
+		Platform:             src.Platform,
 		Inputs:               src.Inputs,
 		Command:              src.Command,
 		Project:              src.Project,
@@ -188,6 +191,9 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 	}
 	if src.CLIOverrides != nil {
 		c.MachineAffinity = slices.Clone(src.CLIOverrides.MachineAffinity)
+		if c.Platform == "" {
+			c.Platform = src.CLIOverrides.Platform
+		}
 	}
 	if c.Provider == "" {
 		if provider, ok := db.RequestedProvider(src.Tags); ok {
@@ -217,6 +223,13 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 			}
 			c.Interconnect = normalized
 		}
+	}
+	if c.Platform != "" {
+		normalized, err := compat.NormalizePlatform(c.Platform)
+		if err != nil {
+			return ResolvedConstraints{Constraints: c}, err
+		}
+		c.Platform = normalized
 	}
 
 	resolved := ResolvedConstraints{Constraints: c}
@@ -275,6 +288,7 @@ func ConstraintSourceFromJob(j *db.Job) ConstraintSource {
 		CPUCores:               j.RequestedCPUCores(),
 		CPUMemGB:               j.RequestedCPUMemGB(),
 		Interconnect:           j.RequestedInterconnect(),
+		Platform:               j.RequestedPlatform(),
 		Inputs:                 j.Inputs,
 		Command:                j.Command,
 		Project:                j.Project,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/artifactspec"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -47,6 +48,7 @@ Examples:
 var (
 	restartGPU           string
 	restartGPUClass      string
+	restartPlatform      string
 	restartProvider      string
 	restartGPUMem        int
 	restartDiskGB        int
@@ -68,6 +70,7 @@ var daemonStatusFunc = daemoncontrol.CurrentStatus
 type restartOverrides struct {
 	GPU                 string
 	GPUClass            string
+	Platform            *string
 	Provider            *string
 	GPUMemGB            *int
 	GPUMemStrict        bool
@@ -207,6 +210,7 @@ func ensureDispatchAfterRestart(w io.Writer) {
 func addRestartFlags(command *cobra.Command) {
 	command.Flags().StringVar(&restartGPU, "gpu", "", "GPU constraint override: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB)")
 	command.Flags().StringVar(&restartGPUClass, "gpu-class", "", "GPU class or generation override (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	command.Flags().StringVar(&restartPlatform, "platform", "", "Required workload OS/architecture override (empty clears)")
 	command.Flags().StringVar(&restartProvider, "provider", "", "Cloud provider override for rental placement (vastai or runpod)")
 	command.Flags().IntVar(&restartGPUMem, "gpu-mem", 0, "GPU memory reservation override in GB per device (0 clears)")
 	command.Flags().IntVar(&restartDiskGB, "disk", 0, "Rental instance disk floor override in GB (0 clears)")
@@ -250,6 +254,14 @@ func resolveRestartTargetJobIDs(database *sql.DB, args []string) ([]int64, error
 	return ParseJobIDs(args)
 }
 
+func restartPlacementConstraints(job *db.Job, overrides restartOverrides) placement.Constraints {
+	constraints := placement.ConstraintsFromJob(job)
+	if overrides.Platform != nil {
+		constraints.Platform = *overrides.Platform
+	}
+	return constraints
+}
+
 func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	var out restartOverrides
 	if restartFromScratch && restartCheckpointed {
@@ -272,6 +284,13 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	out.HasRuntimeDisk = hasRuntimeDisk
 	out.HasDiskMax = hasDiskMax
 	out.HasMinSurvival = hasMinSurvival
+	if cmd.Flags().Changed("platform") {
+		normalized, err := compat.NormalizePlatform(restartPlatform)
+		if err != nil {
+			return out, err
+		}
+		out.Platform = &normalized
+	}
 
 	if gpuValue != "" && gpuClassValue != "" {
 		return out, fmt.Errorf("--gpu and --gpu-class cannot be used together")
@@ -331,7 +350,7 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	}
 	out.GPU = gpuValue
 	out.GPUClass = gpuClassValue
-	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict || hasProvider || hasDisk || hasRuntimeDisk || hasMinSurvival
+	out.HasAny = out.Platform != nil || out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict || hasProvider || hasDisk || hasRuntimeDisk || hasMinSurvival
 	return out, nil
 }
 
@@ -352,6 +371,14 @@ func applyRestartOverrides(database restartExecer, job *db.Job, overrides restar
 
 	if !overrides.HasAny {
 		return updates, nil
+	}
+	if overrides.Platform != nil {
+		if err := updateJobCLIResourceOverrides(database, job, func(current *db.CLIResourceOverrides) {
+			current.Platform = *overrides.Platform
+		}); err != nil {
+			return nil, fmt.Errorf("update platform: %w", err)
+		}
+		updates = append(updates, "platform: "+*overrides.Platform)
 	}
 	if overrides.HasMaxSpend {
 		if err := updateJobCLIResourceOverrides(database, job, func(current *db.CLIResourceOverrides) {
@@ -905,11 +932,22 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		jobRef := ids.FormatJobID(jobID)
 		return fmt.Errorf("job %s has malformed --needs: %w; fix with `weft edit %s --needs ...` or clear with `weft edit %s --clear-needs`", jobRef, err, jobRef, jobRef)
 	}
+	retryJob := job
+	if overrides.Platform != nil {
+		prospective := *job
+		intent := db.CLIResourceOverrides{}
+		if job.CLIResourceOverrides != nil {
+			intent = *job.CLIResourceOverrides
+		}
+		intent.Platform = *overrides.Platform
+		prospective.CLIResourceOverrides = &intent
+		retryJob = &prospective
+	}
 
 	effectiveStatus := job.EffectiveStatus()
 	oldStatus := job.Status
 	if effectiveStatus == db.StatusQueued {
-		if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+		if err := validatePinnedHostQueueGate(job.Host, restartPlacementConstraints(job, overrides)); err != nil {
 			return err
 		}
 		queuedEnded := job.EndTime != nil && *job.EndTime > 0
@@ -919,10 +957,10 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 		hasCloudRetryHistory := cloudAttemptCount > 0
 		shouldForceFreshAttempt := queuedEnded || hasCloudRetryHistory || restartFromScratch
-		var retryHost string
+		retryHost := job.Host
 		var retryLaunchID *int64
 		if shouldForceFreshAttempt {
-			retryHost, retryLaunchID, err = resolveRetryTarget(database, job)
+			retryHost, retryLaunchID, err = resolveRetryTarget(database, retryJob)
 			if err != nil {
 				return err
 			}
@@ -939,7 +977,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err != nil {
 				return err
 			}
-			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+			if err := validatePinnedHostQueueGate(retryHost, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
 			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
@@ -1008,7 +1046,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	if job.Command == "" {
 		return fmt.Errorf("job missing command")
 	}
-	if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+	if err := validatePinnedHostQueueGate(job.Host, restartPlacementConstraints(job, overrides)); err != nil {
 		return err
 	}
 	preparedRetry, err := prepareRetryProjectAndSource(job)
@@ -1016,12 +1054,13 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return err
 	}
 
-	// Cloud jobs: reset to unplaced (the original instance is gone)
+	retryHost, retryLaunchID, err := resolveRetryTarget(database, retryJob)
+	if err != nil {
+		return err
+	}
+
+	// Retain a concrete target; otherwise release the old rental assignment.
 	if job.IsLaunchJob() {
-		retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
-		if err != nil {
-			return err
-		}
 		var updates []string
 		if err := withRestartTx(database, func(tx *sql.Tx) error {
 			var err error
@@ -1029,7 +1068,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err != nil {
 				return err
 			}
-			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+			if err := validatePinnedHostQueueGate(retryHost, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
 			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
@@ -1067,14 +1106,14 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return nil
 	}
 
-	if !job.HasInventoryHost() {
-		// Unplaced terminal jobs can always be retried. Missing host only
-		// disqualifies inventory-pinned retries (handled by HasInventoryHost).
+	if !job.HasInventoryHost() && retryHost == "" && retryLaunchID == nil {
+		// Only jobs without a concrete retry target return to the unplaced
+		// pool. A stored host survives even when the latest attempt is unplaced.
 		if err := withRestartTx(database, func(tx *sql.Tx) error {
 			if _, err := applyRestartOverrides(tx, job, overrides); err != nil {
 				return err
 			}
-			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+			if err := validatePinnedHostQueueGate(retryHost, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
 			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
@@ -1107,10 +1146,6 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return fmt.Errorf("cannot retry job with status '%s'; only unresolved or terminal jobs can be retried", effectiveStatus)
 	}
 
-	retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
-	if err != nil {
-		return err
-	}
 	if retryHost != "" || retryLaunchID != nil {
 		var updates []string
 		if err := withRestartTx(database, func(tx *sql.Tx) error {
@@ -1119,7 +1154,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err != nil {
 				return err
 			}
-			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+			if err := validatePinnedHostQueueGate(retryHost, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
 			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
@@ -1141,7 +1176,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			return err
 		}
 		_ = logcache.Delete(jobID)
-		fmt.Printf("Restarted job %s on %s\n", ids.FormatJobID(jobID), job.Host)
+		fmt.Printf("Restarted job %s on %s\n", ids.FormatJobID(jobID), retryHost)
 		fmt.Printf("  Status: %s → queued\n", oldStatus)
 		printRestartModeLine()
 		for _, update := range updates {
@@ -1163,7 +1198,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err != nil {
 				return err
 			}
-			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+			if err := validatePinnedHostQueueGate(retryHost, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
 			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
@@ -1299,6 +1334,11 @@ func resolveRetryTarget(database *sql.DB, job *db.Job) (string, *int64, error) {
 	if launch == nil || !db.IsLiveLaunchStatus(launch.Status) {
 		return "", nil, nil
 	}
+	if required := job.RequestedPlatform(); required != "" {
+		if result := placement.EvaluateEligibility(placement.Constraints{Platform: required}, campaign.TargetSpecFromCloudInstance(*launch)); !result.Eligible {
+			return "", nil, nil
+		}
+	}
 	launchID := *job.LaunchID
 	return "", &launchID, nil
 }
@@ -1306,11 +1346,14 @@ func resolveRetryTarget(database *sql.DB, job *db.Job) (string, *int64, error) {
 func retryStoredPlacementHost(database *sql.DB, jobID int64) (string, error) {
 	var host sql.NullString
 	err := database.QueryRow(`SELECT placement_host FROM jobs WHERE id = ?`, jobID).Scan(&host)
-	if err == sql.ErrNoRows || !host.Valid {
+	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("get stored placement host for job %d: %w", jobID, err)
+	}
+	if !host.Valid {
+		return "", nil
 	}
 	return strings.TrimSpace(host.String), nil
 }

@@ -784,8 +784,30 @@ rule ReportDeliveredHardware {
 -- Constraints derived from a Job's resource-related fields at placement
 -- time. Job-lifecycle.allium owns the user-facing flags; this spec owns
 -- how those flags resolve into a placement query.
+-- Execution platform is frozen at submission from --platform or PEP 723
+-- platform metadata, with CLI precedence. Accepted OS names are linux and
+-- darwin; architectures are amd64 and arm64, with uname aliases normalized.
+-- The requirement survives fresh attempts and --from. Explicit edit/restart
+-- can replace it or clear it with an empty value.
+rule ExecutionPlatformRequirement {
+    when: EvaluateExecutionPlatform(job, target)
+
+    if job.platform != null and job.platform != "":
+        requires: target.platform != null
+        requires: target.platform = job.platform
+
+    -- Inventory derives this fact from both declared OS and architecture.
+    -- A missing or incompatible fact fails closed, including explicit hosts.
+    -- Vast.ai and RunPod targets use the linux/amd64 agent execution contract.
+    -- Fresh-offer filtering, final launch admission, and live rental reuse
+    -- enforce the same requirement. Grouping never merges conflicting
+    -- platforms. SkyPilot resource selection is external and does not accept
+    -- this native Weft requirement.
+}
+
 value Constraints {
     gpu_class: String?          -- raw constraint string (pre-parse)
+    platform: String?          -- canonical OS/architecture; applies to CPU and GPU jobs
     num_gpus: Integer?          -- exact number of GPUs requested on one
                                 -- host/rental instance; null/0/1 all mean
                                 -- one device. Sources: the --gpus CLI flag

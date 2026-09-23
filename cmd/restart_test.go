@@ -1078,6 +1078,34 @@ func TestRestartLiveRentalJobWithStoredPlacementHostKeepsHost(t *testing.T) {
 	}
 }
 
+func TestRestartUnplacedAttemptPreservesStoredHost(t *testing.T) {
+	restoreHosts := inventory.SetHosts([]inventory.HostSpec{{Name: "host-alpha"}})
+	t.Cleanup(restoreHosts)
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "host-alpha", t.TempDir(), "echo repaired", "retry lost host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the state left by the old edit --retry path: durable host
+	// intent survives, but the canceled latest attempt has no target.
+	if _, err := database.Exec(`UPDATE job_attempts SET host = '', status = ?, end_time = 1234 WHERE job_id = ?`, db.StatusCanceled, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, db.StatusCanceled, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusQueued || job.Host != "host-alpha" || job.TargetKind() != db.JobTargetInventoryHost || job.LaunchID != nil {
+		t.Fatalf("retry = status %q host %q target %s launch %v, want queued on stored inventory host", job.Status, job.Host, job.TargetKind(), job.LaunchID)
+	}
+}
+
 func TestRestartJobRejectsDeterministicPinnedHostGateMismatch(t *testing.T) {
 	restore := inventory.SetHosts([]inventory.HostSpec{
 		{

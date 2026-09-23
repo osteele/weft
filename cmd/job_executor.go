@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -113,6 +114,7 @@ type queueJobOptions struct {
 	CPUReserveCores             int
 	SetupPolicy                 string
 	Interconnect                string
+	Platform                    string
 	Dependencies                []queueDependency
 	AutoStart                   bool
 	Inputs                      []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
@@ -228,6 +230,10 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	cpuMemGB := opts.CPUMemGB
 	interconnect := strings.TrimSpace(opts.Interconnect)
 	cliOverrides := opts.CLIOverrides
+	platform := opts.Platform
+	if platform == "" && cliOverrides != nil {
+		platform = cliOverrides.Platform
+	}
 	scriptMeta, err := dataloc.ScanScriptMeta(localDir, opts.Command)
 	if err != nil {
 		return nil, err
@@ -258,6 +264,17 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 			cliOverrides = ensureQueueCLIOverrides(cliOverrides)
 			cliOverrides.Interconnect = interconnect
 		}
+		if platform == "" {
+			platform = scriptMeta.Platform
+		}
+	}
+	platform, err = compat.NormalizePlatform(platform)
+	if err != nil {
+		return nil, err
+	}
+	if platform != "" {
+		cliOverrides = ensureQueueCLIOverrides(cliOverrides)
+		cliOverrides.Platform = platform
 	}
 	cfg, _ := loadPredictorConfig()
 	gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, opts.GPUMemGB, gpu, opts.GPUClass, opts.GPUMemStrict, opts.Host, opts.Project, opts.Command, 0)
@@ -274,6 +291,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		CPUCores:     cpuCores,
 		CPUMemGB:     cpuMemGB,
 		Interconnect: interconnect,
+		Platform:     platform,
 		Inputs:       opts.Inputs,
 		Command:      opts.Command,
 		Project:      opts.Project,
@@ -301,6 +319,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		GPUMemGB:         gpuMemGB,
 		GPUMemMaxGB:      gpuMemMaxGB,
 		Interconnect:     interconnect,
+		Platform:         platform,
 		CPUCores:         cpuCores,
 		CPUReserveCores:  opts.CPUReserveCores,
 		SetupPolicy:      opts.SetupPolicy,

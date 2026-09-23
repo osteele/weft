@@ -19,6 +19,7 @@ func TargetSpecFromOffer(offer cloud.Offer) placement.TargetSpec {
 	spec := placement.TargetSpec{
 		Name:                            offer.Key(),
 		Provider:                        string(offer.Provider),
+		Platform:                        rentalPlatform(offer.Provider),
 		Devices:                         []placement.TargetDevice{device},
 		GPUInventoryKnown:               true,
 		CUDAVersion:                     strings.TrimSpace(formatCloudCUDAVersion(offer.CUDAVersion)),
@@ -40,6 +41,7 @@ func TargetSpecFromCloudInstance(inst db.Launch) placement.TargetSpec {
 	spec := placement.TargetSpec{
 		Name:                            inst.ProviderInstanceID,
 		Provider:                        inst.Provider,
+		Platform:                        rentalPlatform(provider),
 		Devices:                         []placement.TargetDevice{device},
 		GPUInventoryKnown:               true,
 		CUDAVersion:                     strings.TrimSpace(formatCloudCUDAVersion(inst.CUDAVersion)),
@@ -51,6 +53,41 @@ func TargetSpecFromCloudInstance(inst db.Launch) placement.TargetSpec {
 		spec.NVIDIADriverMajor = major
 	}
 	return spec
+}
+
+// The platform follows the agent execution contract, not the GPU model.
+func rentalPlatform(provider cloud.Provider) string {
+	switch provider {
+	case cloud.ProviderVastai, cloud.ProviderRunpod:
+		return cloudOS + "/" + cloudArch
+	default:
+		return ""
+	}
+}
+
+func groupMatchesPlatform(group InstanceGroup, delivered string) bool {
+	if group.Platform != "" && group.Platform != delivered {
+		return false
+	}
+	for _, job := range group.Jobs {
+		if job != nil && job.RequestedPlatform() != "" && job.RequestedPlatform() != delivered {
+			return false
+		}
+	}
+	return true
+}
+
+func filterOffersByPlatform(group InstanceGroup, offers []cloud.Offer) ([]cloud.Offer, int) {
+	if groupMatchesPlatform(group, "") {
+		return offers, 0
+	}
+	allowed := make([]cloud.Offer, 0, len(offers))
+	for _, offer := range offers {
+		if groupMatchesPlatform(group, rentalPlatform(offer.Provider)) {
+			allowed = append(allowed, offer)
+		}
+	}
+	return allowed, len(offers) - len(allowed)
 }
 
 func targetDeviceFromCloudGPU(provider cloud.Provider, class, resolvedName string, memGB float64, count int) placement.TargetDevice {

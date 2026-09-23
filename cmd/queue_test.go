@@ -10,9 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
@@ -817,6 +820,135 @@ print("new")
 	}
 }
 
+func TestRunEditRetryPreservesTarget(t *testing.T) {
+	restoreHosts := inventory.SetHosts([]inventory.HostSpec{{Name: "host-alpha"}, {Name: "host-beta"}})
+	t.Cleanup(restoreHosts)
+	stubSourceSync(t)
+	originalEnsure := ensureDaemonStartedFunc
+	t.Cleanup(func() { ensureDaemonStartedFunc = originalEnsure })
+	ensureDaemonStartedFunc = func(daemoncontrol.Paths, time.Duration) (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+		return daemoncontrol.Status{Live: true}, daemoncontrol.EnsureNoop, nil
+	}
+
+	for _, tc := range []struct {
+		name          string
+		storedHost    string
+		attemptHost   string
+		launchStatus  string
+		failureReason string
+		wantHost      string
+		wantLaunch    bool
+	}{
+		{name: "explicit host", storedHost: "host-alpha", attemptHost: "host-alpha", wantHost: "host-alpha"},
+		{name: "stored host after lost assignment", storedHost: "host-alpha", wantHost: "host-alpha"},
+		{name: "stored host wins over moved rental", storedHost: "host-alpha", launchStatus: db.LaunchStatusRunning, wantHost: "host-alpha"},
+		{name: "current inventory target", attemptHost: "host-beta", wantHost: "host-beta"},
+		{name: "unplaced auto placement"},
+		{name: "live rental", launchStatus: db.LaunchStatusRunning, wantLaunch: true},
+		{name: "terminated rental", launchStatus: db.LaunchStatusFailed},
+		{name: "incompatible live rental", launchStatus: db.LaunchStatusRunning, failureReason: db.FailureReasonCUDADriverTooOld},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db.SetupTestDB(t)
+			initialHost := tc.attemptHost
+			if initialHost == "" && tc.launchStatus == "" && tc.storedHost != "" {
+				initialHost = "host-beta"
+			}
+			jobID, err := db.RecordQueued(database, initialHost, t.TempDir(), "echo broken", "retry target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Placement intent and the last execution target are independent.
+			if _, err := database.Exec(`UPDATE jobs SET placement_host = ? WHERE id = ?`, tc.storedHost, jobID); err != nil {
+				t.Fatal(err)
+			}
+			var launchID int64
+			if tc.launchStatus != "" {
+				launchID, err = db.CreateLaunch(database, &db.Launch{Status: tc.launchStatus, Provider: "vastai", GPUSpec: "H200"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.AddJobTag(database, jobID, db.TagRental); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := database.Exec(
+				`UPDATE job_attempts SET status = ?, pending_status = NULL, end_time = 1234, exit_code = 1, failure_reason = ?, host = ? WHERE job_id = ?`,
+				db.StatusFailed, tc.failureReason, tc.attemptHost, jobID,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, db.StatusFailed, jobID); err != nil {
+				t.Fatal(err)
+			}
+			before, err := db.GetJobByID(database, jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Status != db.StatusFailed {
+				t.Fatalf("fixture did not reach terminal status: %+v", before)
+			}
+			remoteCalls := 0
+			t.Cleanup(ssh.SetRunner(func(host, command string) (string, string, error) {
+				remoteCalls++
+				if tc.wantHost == "" || host != tc.wantHost {
+					t.Errorf("retry contacted host %q, want only %q", host, tc.wantHost)
+				}
+				return "", "connection timed out", fmt.Errorf("exit status 255")
+			}))
+			resetEditState()
+			t.Cleanup(resetEditState)
+			edit := newEditTestCommand()
+			for flag, value := range map[string]string{"retry": "true", "command": "echo repaired"} {
+				if err := edit.Flags().Set(flag, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			captureStdout(t, func() {
+				if err := runEdit(edit, []string{fmt.Sprint(jobID)}); err != nil {
+					t.Fatalf("runEdit: %v", err)
+				}
+			})
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Status != db.StatusQueued || job.Command != "echo repaired" || job.Host != tc.wantHost {
+				t.Fatalf("retried job = status %q command %q host %q, want queued repaired on %q", job.Status, job.Command, job.Host, tc.wantHost)
+			}
+			if tc.wantLaunch {
+				if job.LaunchID == nil || *job.LaunchID != launchID || job.TargetKind() != db.JobTargetRentalInstance {
+					t.Fatalf("retry target = %s launch %v, want rental %d", job.TargetKind(), job.LaunchID, launchID)
+				}
+			} else if job.LaunchID != nil {
+				t.Fatalf("launch = %v, want no rental assignment", job.LaunchID)
+			}
+			if got, want := job.IsUnplacedQueued(), tc.wantHost == "" && !tc.wantLaunch; got != want {
+				t.Fatalf("eligible for unplaced scheduling = %v, want %v", got, want)
+			}
+			if tc.wantHost != "" && remoteCalls == 0 {
+				t.Fatal("pinned retry never attempted dispatch to its inventory host")
+			}
+			if before.LatestRunID != nil {
+				var previousStatus string
+				var previousExit int
+				if err := database.QueryRow(`SELECT status, exit_code FROM job_attempts WHERE id = ?`, *before.LatestRunID).Scan(&previousStatus, &previousExit); err != nil {
+					t.Fatal(err)
+				}
+				if previousStatus != db.StatusFailed || previousExit != 1 {
+					t.Fatalf("retry overwrote prior outcome: status=%s exit=%d", previousStatus, previousExit)
+				}
+				if (tc.wantHost != "" || tc.wantLaunch) && (job.LatestRunID == nil || *job.LatestRunID == *before.LatestRunID) {
+					t.Fatal("bound retry reused the terminal execution attempt")
+				}
+			}
+		})
+	}
+}
+
 func TestRunEditRejectsSkyPilotWithoutMutation(t *testing.T) {
 	database := db.SetupTestDB(t)
 	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
@@ -939,6 +1071,7 @@ func resetEditState() {
 	editStatus = ""
 	editRetry = false
 	editGPUClass = ""
+	editPlatform = ""
 	editGPUMem = 0
 	editMinSurvival = 0
 	editMaxHourlyRate = ""

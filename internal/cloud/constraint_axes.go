@@ -33,6 +33,7 @@ const (
 	AxisDriver       ConstraintAxis = "driver" // NVIDIA driver version floor
 	AxisCUDA         ConstraintAxis = "cuda"   // provider CUDA compatibility floor
 	AxisInterconnect ConstraintAxis = "interconnect"
+	AxisPlatform     ConstraintAxis = "platform"
 	AxisGeo          ConstraintAxis = "geo"           // excluded countries
 	AxisInstanceType ConstraintAxis = "instance_type" // on-demand vs interruptible
 	AxisCloudType    ConstraintAxis = "cloud_type"    // RunPod community vs secure

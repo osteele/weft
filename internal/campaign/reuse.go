@@ -446,7 +446,7 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		return false, fmt.Sprintf("interconnect mismatch: job requires %s, instance GPU is %q", constraints.Interconnect, inst.DisplayGPUBrief())
 	}
 
-	if ok, reason := matchInstanceTargetEligibility(placement.Constraints{GPUClass: constraints.GPUClass}, inst, 0); !ok {
+	if ok, reason := matchInstanceTargetEligibility(placement.Constraints{GPUClass: constraints.GPUClass, Platform: constraints.Platform}, inst, 0); !ok {
 		return false, reason
 	}
 	if broadNVIDIAConstraint(constraints.GPUClass) && premiumAcceleratorClass(inst.GPUClass, inst.ResolvedGPUName) {

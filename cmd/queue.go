@@ -14,6 +14,8 @@ import (
 	"github.com/osteele/weft/internal/agentdeploy"
 	hostsyncapp "github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/artifactspec"
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -24,6 +26,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/opsqueue"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -208,6 +211,7 @@ var (
 	queueDir_           string
 	queueDescription    string
 	queueProject        string
+	queuePlatform       string
 	queueEnvVars        []string
 	queueHFToken        bool
 	queueHFTokenFrom    string
@@ -239,6 +243,7 @@ var (
 	editStatus          string
 	editRetry           bool
 	editGPUClass        string
+	editPlatform        string
 	editGPUMem          int
 	editMinSurvival     float64
 	editMaxHourlyRate   string
@@ -317,6 +322,7 @@ func init() {
 
 	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path; alias: --dir)")
 	queueAddCmd.Flags().StringVar(&queueProject, "project", "", "Project name (default: repo root name for the working directory)")
+	queueAddCmd.Flags().StringVar(&queuePlatform, "platform", "", "Required workload OS/architecture")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "message", "m", "", "Description of the job")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	queueAddCmd.Flags().MarkHidden("description")
@@ -425,6 +431,17 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	diskMeta := buildDiskMetadata(queueDiskGB, queueDiskMaxGB, queueRuntimeDiskGB)
 	cliOverrides := &db.CLIResourceOverrides{}
+	if cmd.Flags().Changed("platform") && strings.TrimSpace(queuePlatform) == "" {
+		return fmt.Errorf("--platform requires a nonempty OS/architecture")
+	}
+	queuePlatform, err = compat.NormalizePlatform(queuePlatform)
+	if err != nil {
+		return err
+	}
+	if queuePlatform == "" && scriptMeta != nil {
+		queuePlatform = scriptMeta.Platform
+	}
+	cliOverrides.Platform = queuePlatform
 	if strings.TrimSpace(host) != "" {
 		cliOverrides.Host = strings.TrimSpace(host)
 	}
@@ -602,6 +619,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		CPUCores:     queueCPUCores,
 		CPUMemGB:     queueCPUMemGB,
 		Interconnect: queueInterconnect,
+		Platform:     queuePlatform,
 		Dependencies: deps,
 		AutoStart:    !queueNoStart,
 		Inputs:       queueInputs,
@@ -1245,6 +1263,13 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 	tagsChanged := cmd.Flags().Changed("tag") || cmd.Flags().Changed("remove-tag") || editClearTags
 	gpuClassChanged := cmd.Flags().Changed("gpu-class")
 	gpuMemChanged := cmd.Flags().Changed("gpu-mem")
+	platformChanged := cmd.Flags().Changed("platform")
+	if platformChanged {
+		editPlatform, err = compat.NormalizePlatform(editPlatform)
+		if err != nil {
+			return err
+		}
+	}
 	rentalPolicyChanged := rentalPolicyFlagsChanged(cmd)
 	providerChanged := cmd.Flags().Changed("provider")
 	runpodCloudTypeChanged := cmd.Flags().Changed("runpod-cloud-type")
@@ -1252,7 +1277,7 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 	needsChanged := cmd.Flags().Changed("needs") || editClearNeeds
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("project") || cmd.Flags().Changed("command") ||
 		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || rentalPolicyChanged || wallTimeChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged ||
-		tagsChanged
+		tagsChanged || platformChanged
 	if !fieldChanged {
 		return usageErrorf("no changes specified; use metadata, dependency, resource, rental-policy, or status flags")
 	}
@@ -1360,7 +1385,7 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 		// affect placement (e.g. 'processed') and the description/message.
 		nonDisplayFieldChanged := cmd.Flags().Changed("directory") || cmd.Flags().Changed("command") || cmd.Flags().Changed("project") ||
 			envChanged || dependsChanged || queueEditClearDeps || gpuClassChanged || gpuMemChanged ||
-			rentalPolicyChanged || wallTimeChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged || placementTagChanges
+			rentalPolicyChanged || wallTimeChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged || placementTagChanges || platformChanged
 		displayOnlyChange := cmd.Flags().Changed("message") || (tagsChanged && !placementTagChanges)
 		if statusChanged || nonDisplayFieldChanged || !displayOnlyChange {
 			return editNonQueuedJobError(jobID, effectiveStatus)
@@ -1372,9 +1397,54 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 	placementBlockedChanged := statusChanged || placementTagChanges || spendCeilingCents != nil ||
 		cmd.Flags().Changed("directory") || cmd.Flags().Changed("command") || cmd.Flags().Changed("project") ||
 		envChanged || dependsChanged || queueEditClearDeps || gpuClassChanged || gpuMemChanged ||
-		rentalPolicyChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged
+		rentalPolicyChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged || platformChanged
 
 	var updates []string
+	if platformChanged && job.Backend == db.BackendSkyPilot {
+		return fmt.Errorf("SkyPilot owns this job's resource selection; --platform edits are not supported")
+	}
+	if platformChanged && editPlatform != "" && job.IsLaunchJob() && !statusChanged {
+		if job.LaunchID == nil {
+			return fmt.Errorf("assigned rental platform is unknown")
+		}
+		instance, err := db.GetLaunch(database, *job.LaunchID)
+		if err != nil {
+			return fmt.Errorf("read assigned rental platform: %w", err)
+		}
+		if instance == nil {
+			return fmt.Errorf("assigned rental platform is unknown")
+		}
+		result := placement.EvaluateEligibility(placement.Constraints{Platform: editPlatform}, campaign.TargetSpecFromCloudInstance(*instance))
+		if !result.Eligible {
+			return fmt.Errorf("assigned rental: %s", strings.Join(result.Messages(), "; "))
+		}
+	}
+	// Validate the prospective requirement before making a retry dispatchable.
+	// A stored host pin can differ from the latest attempt's target.
+	if platformChanged || (statusChanged && editStatus == db.StatusQueued && job.RequestedPlatform() != "") {
+		targetHost := job.Host
+		if statusChanged && editStatus == db.StatusQueued {
+			targetHost, _, err = resolveRetryTarget(database, job)
+			if err != nil {
+				return err
+			}
+		}
+		constraints := placement.ConstraintsFromJob(job)
+		if platformChanged {
+			constraints.Platform = editPlatform
+		}
+		if err := validatePinnedHostQueueGate(targetHost, constraints); err != nil {
+			return err
+		}
+	}
+	if platformChanged {
+		if err := updateJobCLIResourceOverrides(database, job, func(overrides *db.CLIResourceOverrides) {
+			overrides.Platform = editPlatform
+		}); err != nil {
+			return fmt.Errorf("update platform: %w", err)
+		}
+		updates = append(updates, "platform: "+editPlatform)
+	}
 	if spendCeilingCents != nil {
 		if err := updateJobCLIResourceOverrides(database, job, func(overrides *db.CLIResourceOverrides) {
 			overrides.MaxSpendCents = cloneIntPtr(spendCeilingCents)
@@ -1424,7 +1494,16 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 				return fmt.Errorf("store refreshed source closure: %w", err)
 			}
 		}
-		if err := db.RequeueByID(database, jobID); err != nil {
+		retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
+		if err != nil {
+			return err
+		}
+		if err := withRestartTx(database, func(tx *sql.Tx) error {
+			if err := db.RequeueFreshAttemptByTargetTx(tx, jobID, retryHost, retryLaunchID); err != nil {
+				return err
+			}
+			return db.SetJobMetadata(tx, jobID, persistentAttemptMetadata(job.Metadata))
+		}); err != nil {
 			return fmt.Errorf("update status to queued: %w", err)
 		}
 		// Remove processed tag so the retried job appears in unprocessed listings
@@ -1818,7 +1897,7 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 		if job.IsUnplacedQueued() {
 			// No remote queue; scheduler re-places on next sweep.
 			fmt.Printf("Job %s re-queued (unplaced — scheduler will re-place on next sweep)\n", ids.FormatJobID(job.ID))
-		} else {
+		} else if job.HasInventoryHost() {
 			timeout := ops.DefaultOptions().Timeout
 			if err := ops.RemoveRemoteCompletionFiles(job.Host, job.ID, timeout); err != nil {
 				slog.Warn("failed to remove remote completion files", "component", "edit", "job_id", job.ID, "error", err)
@@ -1834,6 +1913,10 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 					slog.Warn("failed to update queued_at", "component", "queue", "job_id", job.ID, "error", err)
 				}
 			}
+		} else {
+			// Rental retries are dispatched through the instance lifecycle, not
+			// an inventory-host SSH queue.
+			fmt.Printf("Job %s re-queued on %s\n", ids.FormatJobID(job.ID), job.TargetDisplay())
 		}
 	} else {
 		// Job was already queued - update existing entry via sync path
@@ -1874,7 +1957,7 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 		fmt.Printf("Updated draft job %s\n", ids.FormatJobID(jobID))
 	} else if deferredUpdate {
 		fmt.Printf("Updated job %s locally (will apply to %s when reachable)\n", ids.FormatJobID(jobID), job.TargetDisplay())
-	} else if job.Host == "" {
+	} else if job.IsUnplacedQueued() {
 		fmt.Printf("Updated job %s (unplaced — sources will be synced at launch)\n", ids.FormatJobID(jobID))
 	} else {
 		fmt.Printf("Updated job %s in queue on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
@@ -2061,6 +2144,7 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editStatus, "status", "", "Change job status (only 'queued' is allowed, from killed/dead/failed/canceled)")
 	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
 	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	cmd.Flags().StringVar(&editPlatform, "platform", "", "Required workload OS/architecture (empty clears)")
 	cmd.Flags().IntVar(&editGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (0 clears)")
 	cmd.Flags().Float64Var(&editMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; 0 disables; distinct from provider reliability)")
 	cmd.Flags().StringVar(&editMaxHourlyRate, "max-hourly-rate", "", "Maximum rental offer rate in USD per hour; 0 clears")

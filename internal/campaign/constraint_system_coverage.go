@@ -73,6 +73,7 @@ const containerUserlandNote = "cloud jobs run in containers; the host userland i
 var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageNote{
 	SystemOfferChain: {
 		"authorized_target": {checkedInSystem, "EvaluateEligibility rejects offers outside the authenticated edge target set"},
+		"platform":          {checkedInSystem, "filterOffersByPlatform against the provider execution contract"},
 		"capability":        {checkedInSystem, "EvaluateEligibility rejects cloud offers, which do not advertise host-local authenticated services"},
 		"gpu_class":         {checkedInSystem, "provider search + applyEligibilityFilters (SKU memory, class match); per-provider detail in axisEnforcement"},
 		"provider":          {checkedInSystem, "searchAllProvidersWithDiagnostics client selection"},
@@ -90,6 +91,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 	},
 	SystemReuse: {
 		"authorized_target": {checkedInSystem, "EvaluateEligibility rejects reusable instances outside the authenticated edge target set"},
+		"platform":          {checkedInSystem, "EvaluateEligibility against the provider execution contract"},
 		"capability":        {checkedInSystem, "EvaluateEligibility rejects rentals, which do not advertise host-local authenticated services"},
 		"gpu_class":         {checkedInSystem, "matchInstanceTargetEligibility"},
 		"provider":          {checkedInSystem, "matchProviderIntent + providerViolation in EvaluateEligibility"},
@@ -107,6 +109,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 	},
 	SystemOnPrem: {
 		"authorized_target": {checkedInSystem, "EvaluateEligibility rejects inventory hosts outside the authenticated edge target set"},
+		"platform":          {checkedInSystem, "EvaluateEligibility against declared inventory OS/architecture; unknown fails closed"},
 		"capability":        {checkedInSystem, "EvaluateEligibility checks inventory labels and configured concurrency availability"},
 		"gpu_class":         {checkedInSystem, "EvaluateEligibility device matching"},
 		"provider":          {checkedInSystem, "providerViolation in EvaluateEligibility (hosts have no rental provider, so a provider request excludes on-prem)"},
@@ -124,6 +127,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 	},
 	SystemClaimBackstop: {
 		"authorized_target": {notApplicableInSystem, "the authenticated target set is enforced before a target reaches a claim write"},
+		"platform":          {notApplicableInSystem, backstopScopeNote},
 		"capability":        {notApplicableInSystem, backstopScopeNote},
 		"machine_pin":       {checkedInSystem, "assertMachineAffinitySatisfied (setJobLaunchIDOnce, CreateMoveTargetAttempt) + assertNoMachineAffinityForHost (AssignJobHost, host move targets)"},
 		"gpu_class":         {notApplicableInSystem, backstopScopeNote + "; the SKU-memory sub-axis is the standing candidate for a second backstop (the 80GB/40GB incident completed 'successfully')"},

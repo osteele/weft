@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Execution platform requirements**: `--platform OS/arch` and script
+  `platform` metadata constrain CPU-only and GPU jobs across inventory hosts,
+  new rentals, and rental reuse. Explicit host pins must satisfy the same
+  requirement; retry and edit preserve it.
+
 - **Published directory dependencies**: Rental and R2-pull consumers stage
   ready producer directories as exact child-file transfers, preserving nested
   paths and producer-attempt boundaries.
@@ -38,6 +43,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Attempt-fenced completion sync**: Runner completion snapshots identify the
   exact attempt. Legacy job-only completions cannot terminate a newer retry,
   and a failed row update does not block synchronization of sibling jobs (wb178).
+- **Retry target preservation**: `edit --retry` and `edit --status queued`
+  retain stored inventory pins or compatible live rentals. Normal restart
+  restores a stored pin when the latest attempt is unplaced (wb177).
 - **Dispatch diagnosis provenance**: Daemon sync warnings include timestamps;
   log replay is marked as historical. Queued-job diagnosis reports current
   dispatch history and treats missing or unreadable evidence as unknown (wb176).

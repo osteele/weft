@@ -69,6 +69,7 @@ type InstanceGroup struct {
 	CPUCores          int      // Minimum effective CPU cores/vCPUs
 	CPUMemGB          int      // Supremum of host/system RAM (effective) across all jobs in the group
 	Interconnect      string   // Requested intra-host interconnect; see placement.InterconnectValues
+	Platform          string   // Required execution OS/architecture; empty permits any known target
 	AuthorizedTargets []string // Authenticated execution-target grant for edge jobs; empty for hub-local jobs
 	MaxGPUMemGB       int      // Legacy metadata retained for old rows; not used for placement
 	DiskGB            int      // Estimated disk space needed (0 = use default)
@@ -142,6 +143,7 @@ type jobPlacementIntent struct {
 	CPUCores          int
 	CPUMemGB          int
 	Interconnect      string
+	Platform          string
 	Preemptible       bool
 	RentalPolicy      rentalPolicyKey
 	AuthorizedTargets []string
@@ -165,6 +167,7 @@ func placementIntentForJob(job *db.Job) jobPlacementIntent {
 		CPUCores:          job.RequestedCPUCores(),
 		CPUMemGB:          job.RequestedCPUMemGB(),
 		Interconnect:      strings.TrimSpace(job.RequestedInterconnect()),
+		Platform:          job.RequestedPlatform(),
 		Preemptible:       job.UsesPreemptiblePlacement(),
 		RentalPolicy:      rentalPolicyForJob(job),
 		AuthorizedTargets: append([]string(nil), job.EdgeAuthorizedTargets...),
@@ -181,6 +184,7 @@ func (intent jobPlacementIntent) newGroup(job *db.Job) InstanceGroup {
 		CPUCores:          intent.CPUCores,
 		CPUMemGB:          intent.CPUMemGB,
 		Interconnect:      intent.Interconnect,
+		Platform:          intent.Platform,
 		Preemptible:       intent.Preemptible,
 		AuthorizedTargets: append([]string(nil), intent.AuthorizedTargets...),
 		Jobs:              []*db.Job{job},
@@ -204,6 +208,9 @@ func (intent jobPlacementIntent) matchesGroup(g InstanceGroup) bool {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(g.Interconnect), intent.Interconnect) {
+		return false
+	}
+	if g.Platform != intent.Platform {
 		return false
 	}
 	if !equalTargetSetsFold(g.AuthorizedTargets, intent.AuthorizedTargets) {
@@ -676,6 +683,9 @@ func MergeCompatibleGroupsWithDisk(groups []InstanceGroup, estimator func(Instan
 				continue
 			}
 			if !strings.EqualFold(strings.TrimSpace(merged[i].Interconnect), strings.TrimSpace(g.Interconnect)) {
+				continue
+			}
+			if merged[i].Platform != g.Platform {
 				continue
 			}
 			if vramTierOf(merged[i].GPUMemGB) != vramTierOf(g.GPUMemGB) {

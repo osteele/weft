@@ -69,6 +69,33 @@ monitoring (`weft status <job> --wait`, `weft info <job>`, `weft log <job>`)
 unless Weft reports a concrete blocker or terminal failure; avoid killing or
 manually relaunching jobs just because placement is still retrying.
 
+## Execution Platform
+
+Use `--platform OS/arch` when dependencies or numerical results require a
+specific operating system and CPU architecture, including CPU-only jobs:
+
+```bash
+weft run --platform linux/amd64 'uv run analysis.py'
+weft run --platform darwin/arm64 'uv run analysis.py'
+```
+
+The supported values are `linux/amd64`, `linux/arm64`, `darwin/amd64`, and
+`darwin/arm64`. `x86_64` and `aarch64` normalize to `amd64` and `arm64`.
+Scripts can declare the same requirement with `[tool.weft] platform = "linux/amd64"`.
+An explicit CLI value takes precedence.
+
+Inventory eligibility uses the host's declared OS and architecture. A missing
+or incompatible platform excludes that host, even with an explicit `--host`.
+Vast.ai and RunPod rentals use Weft's `linux/amd64` agent execution contract;
+other required platforms exclude both fresh and reusable rentals. Without a
+platform requirement, existing placement behavior applies.
+
+The requirement is saved with the job and retained by retries and `--from`.
+Use `weft edit JOB --platform ...` or `weft restart JOB --platform ...` to
+change it; an empty value clears it. An edit cannot assign an incompatible
+requirement to a queued job on a pinned host or rental. Platform constraints
+do not apply to SkyPilot's externally managed resource selection.
+
 ## Queued Dispatch Evidence
 
 For an inventory job, diagnosis reports the latest dispatch activity for the

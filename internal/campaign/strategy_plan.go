@@ -2037,6 +2037,7 @@ func placementConstraintsFromGroup(group InstanceGroup) placement.Constraints {
 		CPUCores:          group.CPUCores,
 		CPUMemGB:          group.CPUMemGB,
 		Interconnect:      group.Interconnect,
+		Platform:          group.Platform,
 		MaxComputeCap:     group.MaxComputeCap,
 		MinComputeCap:     group.MinComputeCap,
 		MinCUDAVersion:    group.MinCUDAVersion,

@@ -2279,6 +2279,9 @@ func LaunchInstance(
 	if eligible, _ := FilterOffersByAuthorizedTargets(group, []cloud.Offer{offer}); len(eligible) == 0 {
 		return 0, fmt.Errorf("offer %s is outside the jobs' authenticated execution targets", offer.Key())
 	}
+	if !groupMatchesPlatform(group, rentalPlatform(offer.Provider)) {
+		return 0, fmt.Errorf("offer %s does not satisfy the jobs' required execution platform", offer.Key())
+	}
 	if r2Assets.Client == nil {
 		return 0, ErrR2ClientRequired
 	}

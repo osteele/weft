@@ -1886,6 +1886,9 @@ func renderJobInfoFromLedger(w, errW io.Writer, database *sql.DB, job *db.Job) e
 	}
 	printDeliveredGPU(w, database, job)
 	printInterconnect(w, database, job)
+	if required := job.RequestedPlatform(); required != "" {
+		fmt.Fprintf(w, "Platform:    %s (required)\n", required)
+	}
 	if job.CLIResourceOverrides != nil && len(job.CLIResourceOverrides.MachineAffinity) > 0 {
 		fmt.Fprintf(w, "Pinned to:   %s (machine affinity)\n",
 			strings.Join(job.CLIResourceOverrides.MachineAffinity, ", "))

@@ -27,6 +27,9 @@ func validatePinnedHostQueueGate(host string, constraints placement.Constraints)
 
 	spec := inventory.FindHost(host)
 	if spec == nil {
+		if constraints.Platform != "" {
+			return fmt.Errorf("platform gate: host %q platform unknown; requires %s", host, constraints.Platform)
+		}
 		return nil
 	}
 
@@ -99,6 +102,8 @@ func queueGateAxis(reasons []placement.EligibilityReason) string {
 		return "memory"
 	case placement.ReasonInterconnect:
 		return "interconnect"
+	case placement.ReasonPlatform:
+		return "platform"
 	default:
 		return "host"
 	}
