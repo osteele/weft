@@ -235,6 +235,7 @@ type LifecycleEventFilter struct {
 	Kind       string    // exact match
 	LaunchID   int64     // 0 = no filter
 	CampaignID int64     // 0 = no filter
+	JobID      int64     // 0 = no filter
 	Since      time.Time // zero = no lower bound
 	ErrorsOnly bool
 	Limit      int // 0 = default 200
@@ -304,6 +305,10 @@ func ListLifecycleEvents(database *sql.DB, filter LifecycleEventFilter) ([]Lifec
 	if filter.CampaignID != 0 {
 		conditions = append(conditions, "campaign_id = ?")
 		args = append(args, filter.CampaignID)
+	}
+	if filter.JobID != 0 {
+		conditions = append(conditions, "job_id = ?")
+		args = append(args, filter.JobID)
 	}
 
 	if !filter.Since.IsZero() {
@@ -750,6 +755,10 @@ func CountLifecycleEventsByKind(database *sql.DB, filter LifecycleEventFilter) (
 	if filter.LaunchID != 0 {
 		conditions = append(conditions, "launch_id = ?")
 		args = append(args, filter.LaunchID)
+	}
+	if filter.JobID != 0 {
+		conditions = append(conditions, "job_id = ?")
+		args = append(args, filter.JobID)
 	}
 
 	if !filter.Since.IsZero() {

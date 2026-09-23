@@ -135,7 +135,11 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 	}
 	addCmd := opsqueue.NewAddCommand(entry)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
-	return appendQueueCommand(job.Host, addCmd, opts)
+	if err := appendQueueCommand(job.Host, addCmd, opts); err != nil {
+		return err
+	}
+	recordQueueDispatchOK(database, job.ID)
+	return nil
 }
 
 func queueProtocolCompatibilityError(host string, state *opsqueue.RunnerState) error {

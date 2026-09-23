@@ -488,3 +488,54 @@ func TestLatestInventoryDispatchBlockR2PreflightFailureSurvivesOK(t *testing.T) 
 		t.Fatalf("block.Detail = %q, want %q", block.Detail, detail)
 	}
 }
+
+func TestQueuedDispatchEvidenceIsScopedToCurrentJobRequest(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Unix(20_000, 0)
+	jobID, err := db.RecordQueued(database, "host-alpha", "/tmp", "echo work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, now.Add(-time.Hour).Unix(), jobID); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []db.LifecycleEvent{
+		{JobID: jobID, OccurredAt: now.Add(-2 * time.Hour).Unix(), EventKind: db.EventQueueDispatchOK},
+		{JobID: jobID + 1, OccurredAt: now.Unix(), EventKind: db.EventQueueDispatchOK},
+	} {
+		if err := db.InsertLifecycleEvent(database, &event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := ForJob(database, job, now)
+	if x.Confidence != "low" || x.AutoReplanAllowed || x.SuggestedAction == queuedSuggestedAction(job) {
+		t.Fatalf("absence of current dispatch history was presented as a known queue wait: %+v", x)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		JobID: jobID, OccurredAt: now.Add(-time.Minute).Unix(), EventKind: db.EventQueueDispatchOK,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	x = ForJob(database, job, now)
+	found := false
+	for _, evidence := range x.Evidence {
+		if evidence.Label == "dispatch" && strings.Contains(evidence.Value, db.EventQueueDispatchOK) &&
+			strings.Contains(evidence.Value, now.Add(-time.Minute).UTC().Format(time.RFC3339)) {
+			found = true
+		}
+	}
+	if !found || x.SuggestedAction != queuedSuggestedAction(job) {
+		t.Fatalf("current successful dispatch was not distinguished from missing evidence: %+v", x)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	x = ForJob(database, job, now)
+	if x.Confidence != "low" || x.PrimaryReason == queuedReason(job) {
+		t.Fatalf("failed history lookup asserted a known queue condition: %+v", x)
+	}
+}

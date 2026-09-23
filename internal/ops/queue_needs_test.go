@@ -120,6 +120,53 @@ func recordR2NeedsConsumer(t *testing.T, database *sql.DB, needs []string) *db.J
 	return job
 }
 
+func TestQueueDispatchRecordsCurrentAttemptReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		update bool
+		fail   bool
+	}{
+		{name: "remote queue submission"},
+		{name: "queued payload update", update: true},
+		{name: "failed remote submission", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, store, _ := setupR2QueueNeeds(t)
+			job := recordR2NeedsConsumer(t, database, nil)
+			mockQueueSourceSync(t, "")
+			if tc.fail {
+				store.putError = errors.New("queue transport unavailable")
+			}
+			var err error
+			if tc.update {
+				err = applyQueueUpdate(database, job, nil, "", time.Second)
+			} else {
+				err = QueueJobToRemote(database, job, time.Second)
+			}
+			if tc.fail {
+				if !errors.Is(err, store.putError) {
+					t.Fatalf("dispatch error = %v, want transport failure", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			job, err = db.GetJobByID(database, job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := db.LatestLifecycleEvent(database, db.LifecycleEventFilter{
+				JobID: job.ID, KindPrefix: db.EventQueueDispatchOK, Since: time.Unix(db.DispatchRunFloor(job), 0),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (receipt == nil) != tc.fail {
+				t.Fatalf("dispatch receipt = %+v, failed transport = %v", receipt, tc.fail)
+			}
+		})
+	}
+}
+
 func recordNeedProducerWithoutPublication(t *testing.T, database *sql.DB, host string) (string, string, int64) {
 	t.Helper()
 	id, err := db.RecordQueued(database, host, "/tmp/producer", "produce", "producer")

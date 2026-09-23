@@ -38,6 +38,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Attempt-fenced completion sync**: Runner completion snapshots identify the
   exact attempt. Legacy job-only completions cannot terminate a newer retry,
   and a failed row update does not block synchronization of sibling jobs (wb178).
+- **Dispatch diagnosis provenance**: Daemon sync warnings include timestamps;
+  log replay is marked as historical. Queued-job diagnosis reports current
+  dispatch history and treats missing or unreadable evidence as unknown (wb176).
 - **Artifact dependency failure isolation**: Confirmed missing or failed
   producer artifacts fail the rental consumer with a dependency diagnosis.
   Pending publication and storage lookup errors defer admission. These

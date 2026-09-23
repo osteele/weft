@@ -192,7 +192,11 @@ func applyQueueUpdate(database *sql.DB, job *db.Job, envVars []string, depSpec s
 			entry.SourceSHA256 = manifest.SHA256
 			entry.SourceR2Key = dataplane.SourceClosureReceiptV2(manifest.SHA256)
 		}
-		return appendQueueCommand(job.Host, opsqueue.NewAddCommand(entry), opsqueue.AppendCommandOptions{Timeout: timeout})
+		if err := appendQueueCommand(job.Host, opsqueue.NewAddCommand(entry), opsqueue.AppendCommandOptions{Timeout: timeout}); err != nil {
+			return err
+		}
+		recordQueueDispatchOK(database, job.ID)
+		return nil
 	}
 	return writeQueueJobFile(job.Host, entry, timeout)
 }

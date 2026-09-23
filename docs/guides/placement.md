@@ -69,6 +69,18 @@ monitoring (`weft status <job> --wait`, `weft info <job>`, `weft log <job>`)
 unless Weft reports a concrete blocker or terminal failure; avoid killing or
 manually relaunching jobs just because placement is still retrying.
 
+## Queued Dispatch Evidence
+
+For an inventory job, diagnosis reports the latest dispatch activity for the
+current queue request, including its timestamp. Ten minutes without a recorded
+dispatch event prompts inspection of the daemon and queue runner rather than a
+claim that the host is busy. Missing history or a failed lookup does not prove
+that a runner is idle, busy, or dead.
+
+`weft daemon logs` replays historical files; undated entries have unknown age.
+New daemon sync warnings carry timestamps. An old staging warning is not
+evidence that a terminal job is still being dispatched.
+
 ## Steering Placement
 
 Use `--gpu`, `--gpu-class`, and `--gpu-mem` to describe required hardware:

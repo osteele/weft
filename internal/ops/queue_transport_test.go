@@ -16,7 +16,8 @@ import (
 )
 
 type fakeInventoryQueueStore struct {
-	objects map[string][]byte
+	objects  map[string][]byte
+	putError error
 }
 
 func (s *fakeInventoryQueueStore) GetObject(_ context.Context, key string) ([]byte, error) {
@@ -24,6 +25,9 @@ func (s *fakeInventoryQueueStore) GetObject(_ context.Context, key string) ([]by
 }
 
 func (s *fakeInventoryQueueStore) PutObject(_ context.Context, key string, body io.Reader, _ string) error {
+	if s.putError != nil {
+		return s.putError
+	}
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return err

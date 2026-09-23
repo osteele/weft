@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -368,7 +369,7 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, re
 		Verbose:           verbose,
 	})
 	for _, warning := range syncResult.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", secrets.RedactText(warning))
+		slog.Warn("daemon pre-pass sync", "detail", secrets.RedactText(warning))
 	}
 
 	// The outcome describes what the autopilot pass did, not what sync found.
@@ -764,7 +765,7 @@ func printLogFile(out io.Writer, path string, offset int64) (int64, error) {
 		return offset, err
 	}
 	if offset == 0 {
-		fmt.Fprintf(out, "==> %s <==\n", path)
+		fmt.Fprintf(out, "==> %s (historical log; undated entries have unknown age) <==\n", path)
 	}
 	if _, err := io.Copy(out, f); err != nil {
 		return offset, err

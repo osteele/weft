@@ -166,6 +166,7 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 	case db.StatusQueued:
 		x.PrimaryReason = queuedReason(job)
 		x.SuggestedAction = queuedSuggestedAction(job)
+		appendInventoryDispatchProgress(database, job, now, &x)
 	case db.StatusPendingPlacement:
 		x.PrimaryReason = "placement is in progress"
 		x.SuggestedAction = "wait for placement to finish"
@@ -212,6 +213,37 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		x.SuggestedAction = "inspect job and attempt history"
 	}
 	return x
+}
+
+// Missing dispatch history is not evidence of a busy or idle runner.
+func appendInventoryDispatchProgress(database *sql.DB, job *db.Job, now time.Time, x *Explanation) {
+	if database == nil || !job.HasInventoryHost() {
+		return
+	}
+	floor := db.DispatchRunFloor(job)
+	event, err := db.LatestLifecycleEvent(database, db.LifecycleEventFilter{
+		JobID: job.ID, KindPrefix: "queue.dispatch.", Since: time.Unix(floor, 0),
+	})
+	if err != nil {
+		x.Evidence = append(x.Evidence, Evidence{Label: "dispatch", Value: "history unavailable: " + err.Error()})
+		x.Confidence = "low"
+		x.PrimaryReason = "job is queued; dispatch history is unavailable"
+		x.SuggestedAction = "inspect daemon and queue runner state"
+		return
+	}
+	if event != nil {
+		x.Evidence = append(x.Evidence, Evidence{
+			Label: "dispatch",
+			Value: fmt.Sprintf("%s at %s (%s ago)", event.EventKind, time.Unix(event.OccurredAt, 0).UTC().Format(time.RFC3339), now.Sub(time.Unix(event.OccurredAt, 0)).Round(time.Second)),
+		})
+		return
+	}
+	x.Evidence = append(x.Evidence, Evidence{Label: "dispatch", Value: "no dispatch activity recorded for this queue request; runner state is unknown"})
+	if floor > 0 && now.Sub(time.Unix(floor, 0)) >= InventoryDispatchReplanThreshold {
+		x.Confidence = "low"
+		x.PrimaryReason = fmt.Sprintf("job is queued with no recorded dispatch activity for %s", now.Sub(time.Unix(floor, 0)).Round(time.Second))
+		x.SuggestedAction = "inspect daemon and queue runner state"
+	}
 }
 
 func latestLaunchTerminatedWith(database *sql.DB, job *db.Job, reason string) bool {
