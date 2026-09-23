@@ -899,7 +899,7 @@ contract ConstraintSystemCoverage {
 -- GPU memory floor (wb130); each was a path re-binding without a full
 -- eligibility pass.
 contract BindingPathsAreExhaustive {
-    -- The eight binding paths and their implementations:
+    -- The binding paths and their implementations:
         --   submit: job-lifecycle PlaceJob calls SelectBestHost here
         --   cloud_spill: PlaceWithFallback's spill branch (control passes
         --     to campaign-lifecycle's launch workflow)
