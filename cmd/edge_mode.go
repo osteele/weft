@@ -130,6 +130,7 @@ var edgeCommandModes = map[string]edgeModeEntry{
 	"diagnose":             {edgeModeMirror, ""},
 	"diagnose instance":    {edgeModeMirror, ""},
 	"diagnose job":         {edgeModeMirror, ""},
+	"diagnose shadow":      {edgeModeMirror, ""},
 	"estimation eval":      {edgeModeMirror, ""},
 	"estimation status":    {edgeModeMirror, ""},
 	"export training-data": {edgeModeMirror, ""},
