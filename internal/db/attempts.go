@@ -1056,16 +1056,6 @@ func SetAttemptVastaiInstance(db *sql.DB, jobID int64, _ int) error {
 	return err
 }
 
-// SetAttemptCost updates the cost on the latest open attempt.
-func SetAttemptCost(db *sql.DB, jobID int64, cost float64) error {
-	_, err := db.Exec(`
-		UPDATE job_attempts SET cost = ?
-		WHERE id = `+latestOpenAttemptSubquery,
-		cost, jobID,
-	)
-	return err
-}
-
 // SetAttemptPlacementMeta stores placement telemetry on the latest open attempt.
 func SetAttemptPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
 	encoded, err := encodePlacementMeta(meta)

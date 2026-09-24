@@ -1723,11 +1723,6 @@ func SetJobVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
 	return SetAttemptVastaiInstance(db, jobID, instanceID)
 }
 
-// SetJobCost updates the actual cost for a cloud-run job.
-func SetJobCost(db *sql.DB, jobID int64, cost float64) error {
-	return SetAttemptCost(db, jobID, cost)
-}
-
 // SetJobPlacementMeta stores placement telemetry on a job record.
 func SetJobPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
 	return SetAttemptPlacementMeta(db, jobID, meta)

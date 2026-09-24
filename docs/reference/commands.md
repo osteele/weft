@@ -1081,17 +1081,36 @@ weft job recommend --recent 100
 
 ### weft job cost
 
-Show cost for each job that has a recorded cost, with instance context.
+Show what each job was billed, with instance context.
 
 ```bash
 weft job cost
-weft cost jobs      # Alias
+weft cost jobs            # Alias
+weft cost jobs --all      # Examine every job, not just the most recent ones
+weft cost jobs --limit 50 # Examine 50 jobs, active first then newest
 ```
+
+| Flag | Description |
+| --- | --- |
+| `--all`, `-a` | Examine every known job instead of the most recent ones |
+| `--limit N` | How many jobs to examine, active first then newest (default 200; ignored with `--all`) |
 
 Output is one block per job (matching `weft job status` style) showing the job
 cost, the instance it ran on, how many jobs shared that instance, the instance's
 total cost, and per-job overhead. Useful for attributing cloud spend to
 individual jobs, especially when a job was the sole occupant of an instance.
+
+Cost is computed from rental uptime × rate over the job's attempts — the same
+basis as `weft info <id>` — so spend that lives in a job's rental history is
+reported even though nothing writes a per-job cost scalar.
+
+The report always states its own selection: how many jobs were examined out of
+how many are known, and how many were left outside it and may carry cost. The
+examined set is ordered active jobs first, then newest, so a long-running job
+is examined even when newer jobs exist. A job that ran on rental instances
+whose cost cannot be attributed to it alone (a shared instance with no
+recorded allocation) is listed with an
+`unknown` cost rather than being omitted or shown as `$0.00`.
 
 ### weft job list
 
@@ -1833,6 +1852,7 @@ Cross-cutting cost summaries. Each subcommand also has a noun-verb alias.
 ```bash
 weft cost instances                     # Rate, duration, and actual cost per instance
 weft cost jobs                          # Per-job cost with instance context and overhead
+weft cost jobs --all                    # Examine every job, not just the newest 200
 weft cost campaigns                     # Estimated vs actual cost per campaign batch
 
 # Noun-verb aliases
@@ -1843,7 +1863,10 @@ weft campaign cost
 
 `weft cost jobs` / `weft job cost` shows a detail block per job (matching
 `weft job status` style) with job cost, instance, jobs-on-instance count,
-instance total cost, and per-job overhead.
+instance total cost, and per-job overhead. It examines 200 jobs by default,
+active first then newest (`--limit`, `--all`), and always reports the selection it used, so an
+empty result names the jobs it looked at rather than implying no spend. See
+[weft job cost](#weft-job-cost).
 
 ### weft narrate
 
