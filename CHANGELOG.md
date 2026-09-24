@@ -57,6 +57,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deployment. A process that cannot compute the hash reports the host as
   `unknown` and leaves its binary in place, instead of redeploying and
   re-execing the runner on every dispatch pass.
+- **Runner capability evidence**: A host whose runner state could not be read
+  is reported as unknown rather than as a runner lacking the capability. The
+  `weft queue update` remedy is reserved for a state that was read and does
+  lack it, so an unreadable publication no longer prescribes a redeploy that
+  cannot clear the block (wb182).
+- **Queue position under an unobserved host**: While an inventory host's runner
+  publication is stale, `weft status` reports the queue position and progress
+  as unknown instead of naming a job ahead, whose row is equally stale (wb181).
+- **Job cost completeness**: `weft cost jobs` computes cost from rental history
+  on the same basis as `weft info`, states the selection it applied, names the
+  jobs it did not examine, and reports an unattributable shared rental as
+  unknown rather than as zero. `--all` and `--limit` select the window (wb179).
+- **Pinned-source edits**: A command-only `weft edit` of a job with an
+  immutable source pin no longer attempts a mutable source push, which failed
+  against scoped task snapshots and blocked the edit. The queue update still
+  applies and the recorded pin is untouched (wb180).
 
 - **Artifact dependency failure isolation**: Confirmed missing or failed
   producer artifacts fail the rental consumer with a dependency diagnosis.
