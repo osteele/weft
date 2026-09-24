@@ -47,6 +47,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   existing terminal status is now idempotent, so a job left in that state by
   an earlier release settles on the next sync instead of failing every
   completion write against the terminal-once index.
+- **Stale queue intent on a finished attempt**: A dispatch pass that stamps a
+  queue intent on a job which has since finished no longer issues an sbatch or
+  queue append for the completed attempt, and no longer records the refusal as
+  a dispatch failure feeding backoff and host cordoning. Reconciliation drops
+  the stale intent and keeps the attempt's recorded outcome.
 - **Attempt-fenced completion sync**: Runner completion snapshots identify the
   exact attempt. Legacy job-only completions cannot terminate a newer retry,
   and a failed row update does not block synchronization of sibling jobs (wb178).

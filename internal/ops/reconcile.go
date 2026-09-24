@@ -3,6 +3,7 @@ package ops
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -118,6 +119,22 @@ func Reconcile(database *sql.DB, job *db.Job, remoteStatus string, opts Reconcil
 					Error:  err,
 				}, nil
 			}
+			// The intent was stamped on an attempt that had already
+			// finished. Leaving it in place would re-offer the same
+			// no-op every pass; the attempt's outcome is what stands.
+			if errors.Is(err, db.ErrAttemptAlreadyTerminal) {
+				if clearErr := db.ClearPendingStatus(database, job.ID); clearErr != nil {
+					return nil, clearErr
+				}
+				oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+					oplog.WithDetailf("dropped stale %s intent on a finished attempt", *local))
+				return &ReconcileResult{
+					Action:     "update_db",
+					OldStatus:  base,
+					NewStatus:  remote,
+					Resolution: fmt.Sprintf("dropped stale %s intent recorded against a finished attempt", *local),
+				}, nil
+			}
 			return nil, err
 		}
 		return result, nil
@@ -167,20 +184,26 @@ func resolveConflict(database *sql.DB, job *db.Job, base, local, remote string, 
 		// Apply the requeue rather than accepting stale completion.
 		if local == db.StatusQueued {
 			result, err := applyPendingToRemote(database, job, local, opts)
-			if err != nil {
-				if ssh.IsConnectionError(err.Error()) {
-					return &ReconcileResult{
-						Action:     "none",
-						Conflict:   true,
-						Resolution: "deferred: connection error",
-						Error:      err,
-					}, nil
-				}
+			switch {
+			case err == nil:
+				result.Conflict = true
+				result.Resolution = fmt.Sprintf("requeued over stale terminal state %s", remote)
+				return result, nil
+			case ssh.IsConnectionError(err.Error()):
+				return &ReconcileResult{
+					Action:     "none",
+					Conflict:   true,
+					Resolution: "deferred: connection error",
+					Error:      err,
+				}, nil
+			case errors.Is(err, db.ErrAttemptAlreadyTerminal):
+				// The intent was stamped on an attempt that had already
+				// finished, so it describes no run anyone asked for. Fall
+				// through to accepting the remote's terminal state, which
+				// also clears the stale intent.
+			default:
 				return nil, err
 			}
-			result.Conflict = true
-			result.Resolution = fmt.Sprintf("requeued over stale terminal state %s", remote)
-			return result, nil
 		}
 
 		// Remote reached a terminal state - accept it
@@ -219,6 +242,18 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 	timeout := opts.Timeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
+	}
+
+	// A queue/draft intent recorded against an attempt that has already
+	// finished is stale: a real requeue opens a fresh attempt, so the latest
+	// one is never terminal. Refuse before touching the remote, because the
+	// remote work here is an sbatch submission or a queue append — telling a
+	// cluster to run a job that already ran, and only then discovering from
+	// ErrAttemptAlreadyTerminal that the local write is refused.
+	if targetStatus == db.StatusQueued || targetStatus == db.StatusDraft {
+		if db.LatestAttemptHasRecordedOutcome(database, job.ID) {
+			return nil, fmt.Errorf("%w: job %d intent %s", db.ErrAttemptAlreadyTerminal, job.ID, targetStatus)
+		}
 	}
 
 	var err error

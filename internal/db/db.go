@@ -2083,6 +2083,16 @@ func attemptHasRecordedOutcome(s string) bool {
 	return false
 }
 
+// LatestAttemptHasRecordedOutcome reports whether a job's latest attempt
+// already carries an execution outcome. Callers that are about to do remote
+// work on a job's behalf — submit an sbatch, append to a queue — use this to
+// find out before acting, rather than discovering it from
+// ErrAttemptAlreadyTerminal after the remote side has already been told.
+// A job with no attempt reports false.
+func LatestAttemptHasRecordedOutcome(db *sql.DB, jobID int64) bool {
+	return attemptHasRecordedOutcome(getAttemptStatus(db, jobID, false))
+}
+
 // ClearPendingAndUpdateStatus clears pending status and updates both status fields.
 // Used when reconciliation succeeds or when accepting remote state.
 // Clears session_name for non-running states per spec: SessionImpliesRunning.

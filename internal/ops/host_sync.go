@@ -1487,6 +1487,14 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		if job.Backend == db.BackendSlurm {
 			outcome, err := requestJobStatus(database, job, db.StatusQueued, ExecuteOptions{Timeout: timeout})
 			if err != nil {
+				// The job finished while this pass was mid-dispatch. Nothing
+				// was submitted and nothing failed, so this must not feed the
+				// dispatch-failure counters that drive backoff and cordoning.
+				if errors.Is(err, db.ErrAttemptAlreadyTerminal) {
+					recordSettledDuringDispatch(job.ID, err)
+					_ = db.ClearPendingStatus(database, job.ID)
+					continue
+				}
 				recordFailure(job.ID, "slurm submission failed", err)
 				continue
 			}
