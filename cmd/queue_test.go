@@ -820,6 +820,116 @@ print("new")
 	}
 }
 
+// TestRunEditCommandOnlyRespectsSourcePin is the regression test for wb180:
+// editing the command of a queued job whose source is an immutable pinned
+// snapshot must not push mutable source bytes at the host (the pinned remote
+// tree is not a writable working copy — for scoped agent-offload task snapshots
+// the rsync destination is not even writable, which hung the CLI), while the
+// queue entry update that the edit exists for still has to happen. An unpinned
+// job keeps syncing, warning and all.
+func TestRunEditCommandOnlyRespectsSourcePin(t *testing.T) {
+	restoreHosts := inventory.SetHosts([]inventory.HostSpec{{Name: "host-alpha"}})
+	t.Cleanup(restoreHosts)
+
+	for _, tc := range []struct {
+		name     string
+		pin      *db.JobSourcePinMetadata
+		wantSync bool
+	}{
+		{name: "pinned snapshot", pin: &db.JobSourcePinMetadata{Hash: "manifest-a"}},
+		{name: "mutable working copy", wantSync: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The post-edit host sync is not the subject here; keep its rsync
+			// out of the test's way.
+			stubSourceSync(t)
+			database := db.SetupTestDB(t)
+			dir := t.TempDir()
+			jobID, err := db.RecordQueued(database, "host-alpha", dir, "echo old", "pinned edit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.pin != nil {
+				if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Source: &db.JobSourceMetadata{
+					Pin: tc.pin,
+				}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			syncCalls := 0
+			originalSync := editSyncSourcesFunc
+			t.Cleanup(func() { editSyncSourcesFunc = originalSync })
+			editSyncSourcesFunc = func(host, _, remoteDir string, _ []string, _ []string) error {
+				syncCalls++
+				return fmt.Errorf("rsync to %s:%s ERROR cannot stat destination Permission denied (13)", host, remoteDir)
+			}
+			t.Cleanup(ssh.SetRunner(func(string, string) (string, string, error) {
+				return "", "connection timed out", fmt.Errorf("exit status 255")
+			}))
+
+			resetEditState()
+			t.Cleanup(resetEditState)
+			edit := newEditTestCommand()
+			if err := edit.Flags().Set("command", "echo repaired"); err != nil {
+				t.Fatal(err)
+			}
+			var stderr string
+			stdout := captureStdout(t, func() {
+				stderr = captureStderr(t, func() {
+					if err := runEdit(edit, []string{fmt.Sprint(jobID)}); err != nil {
+						t.Fatalf("runEdit: %v", err)
+					}
+				})
+			})
+
+			if got := syncCalls > 0; got != tc.wantSync {
+				t.Fatalf("attempted mutable source sync = %v, want %v (stdout %q)", got, tc.wantSync, stdout)
+			}
+			// The command change is the point of the edit: it must reach the
+			// job row and be requested against the host's queue either way.
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Command != "echo repaired" {
+				t.Fatalf("command = %q, want %q", job.Command, "echo repaired")
+			}
+			pending, err := db.HasPendingOperation(database, jobID, db.OpUpdateQueuedJob)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !pending {
+				t.Fatalf("no queue update was requested for the edited job (stdout %q)", stdout)
+			}
+
+			if tc.pin == nil {
+				if !strings.Contains(stderr, "source sync failed") {
+					t.Fatalf("stderr = %q, want the unpinned sync failure warning", stderr)
+				}
+				if strings.Contains(stdout, "Source not re-synced") {
+					t.Fatalf("stdout = %q, unpinned edit must not claim a pinned source", stdout)
+				}
+				return
+			}
+			// The pinned manifest stays authoritative, and the user is told the
+			// source was deliberately left alone.
+			gotPin := ""
+			if job.Metadata != nil && job.Metadata.Source != nil && job.Metadata.Source.Pin != nil {
+				gotPin = job.Metadata.Source.Pin.Hash
+			}
+			if gotPin != "manifest-a" {
+				t.Fatalf("source pin hash = %q, want manifest-a", gotPin)
+			}
+			for _, want := range []string{"Source not re-synced", "manifest-a"} {
+				if !strings.Contains(stdout, want) {
+					t.Fatalf("stdout = %q, missing %q", stdout, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRunEditRetryPreservesTarget(t *testing.T) {
 	restoreHosts := inventory.SetHosts([]inventory.HostSpec{{Name: "host-alpha"}, {Name: "host-beta"}})
 	t.Cleanup(restoreHosts)

@@ -1233,6 +1233,28 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// editSyncSourcesFunc is the edit path's mutable source push, indirected so
+// tests can observe whether an edit attempted one.
+var editSyncSourcesFunc = srcsync.SyncSourcesToHostForCommands
+
+// jobSourcePin returns the job's immutable source pin, or nil when the job's
+// sources are a mutable working copy.
+func jobSourcePin(job *db.Job) *db.JobSourcePinMetadata {
+	if job == nil || job.Metadata == nil || job.Metadata.Source == nil {
+		return nil
+	}
+	return job.Metadata.Source.Pin
+}
+
+// formatSourcePinSuffix renders the pin's manifest hash for user-facing output,
+// and nothing at all when the pin records no hash.
+func formatSourcePinSuffix(pin *db.JobSourcePinMetadata) string {
+	if pin == nil || pin.Hash == "" {
+		return ""
+	}
+	return " (" + pin.Hash + ")"
+}
+
 func runEdit(cmd *cobra.Command, args []string) error {
 	return runEditWithSpendCeiling(cmd, args, nil)
 }
@@ -1932,12 +1954,21 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 		// Job was already queued - update existing entry via sync path
 		job.DepSpec = depSpec
 
-		// Re-sync sources so the queued job picks up local changes
+		// Re-sync sources so the queued job picks up local changes. A job whose
+		// source is recorded as an immutable pin carries its own authoritative
+		// manifest: the remote tree is that pinned snapshot, not a mutable
+		// working copy, so pushing local bytes at it would put the recorded pin
+		// at risk (and for scoped task snapshots the destination is not even
+		// writable by the editing user).
 		if job.WorkingDir != "" && job.Host != "" {
-			localDir := workdir.ResolveLocal(job.WorkingDir)
-			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
-			if err := srcsync.SyncSourcesToHostForCommands(job.Host, localDir, remoteDir, job.Inputs, []string{job.Command}); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: source sync failed: %v\n", err)
+			if pin := jobSourcePin(job); pin != nil {
+				fmt.Printf("Source not re-synced: job %s has a pinned source snapshot%s\n", ids.FormatJobID(job.ID), formatSourcePinSuffix(pin))
+			} else {
+				localDir := workdir.ResolveLocal(job.WorkingDir)
+				remoteDir := workdir.ToTildeRelative(job.WorkingDir)
+				if err := editSyncSourcesFunc(job.Host, localDir, remoteDir, job.Inputs, []string{job.Command}); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: source sync failed: %v\n", err)
+				}
 			}
 		}
 
