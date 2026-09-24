@@ -326,13 +326,13 @@ func TestR2PreflightRejectionReconcilesWithoutRedispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shouldRedispatchSyncedJob(job, &state, payloads, nil) {
+	if shouldRedispatchSyncedJob(job, &state, payloads, nil, time.Time{}) {
 		t.Fatal("rejected attempt was redispatched as a missing payload")
 	}
 	// A stale rejection must neither suppress a new attempt nor close it.
 	newRunID := runID + 1
 	job.LatestRunID = &newRunID
-	if !shouldRedispatchSyncedJob(job, &state, payloads, nil) {
+	if !shouldRedispatchSyncedJob(job, &state, payloads, nil, time.Time{}) {
 		t.Fatal("old rejection blocked a new attempt")
 	}
 	if n, err := applyBatchStatuses(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second); err != nil || n != 0 {

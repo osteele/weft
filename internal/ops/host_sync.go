@@ -800,6 +800,63 @@ func runIDsCompatible(want *int64, got int64) bool {
 	return want == nil || *want == 0 || got == 0 || *want == got
 }
 
+// redispatchPublicationMissingDetail is the detail recorded when weft resets
+// a durable dispatch and re-appends the job. It doubles as the durable marker
+// for when weft last re-dispatched a job: the forward reconcile reads it back
+// to decide whether a later absence observation could possibly have seen that
+// re-dispatch. It is recorded without dedupe for that reason — a collapsed row
+// would report a stale re-dispatch instant and re-open the loop this fence
+// closes.
+const redispatchPublicationMissingDetail = "remote queue publication missing; re-dispatching"
+
+// lastPublicationRedispatchAt returns when weft last reset and re-appended
+// this job's dispatch, or the zero time when it never has. Only rows carrying
+// redispatchPublicationMissingDetail count; other deferrals (backoff, unknown
+// publication, staging failures) are not dispatches.
+func lastPublicationRedispatchAt(database *sql.DB, jobID int64) time.Time {
+	if database == nil || jobID == 0 {
+		return time.Time{}
+	}
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		JobID: jobID, Kind: db.EventQueueDispatchDeferred, Limit: 50,
+	})
+	if err != nil {
+		return time.Time{}
+	}
+	for _, event := range events { // newest first
+		if event.Detail == redispatchPublicationMissingDetail {
+			return time.Unix(event.OccurredAt, 0)
+		}
+	}
+	return time.Time{}
+}
+
+// runnerConsumedRedispatch reports whether the runner has positively consumed
+// the queue commands weft issued up to its last re-dispatch of this job.
+//
+// The runner's cursor is the timestamp of the last queue command it applied,
+// and every command's timestamp is stamped by this machine when the command is
+// created (opsqueue.NewAddCommand), so the comparison is skew-free. A runner
+// that has not yet reached that point has not had the chance to materialize
+// the payload weft is about to declare missing: the dispatch is in flight, not
+// lost. A missing, empty, or unparseable cursor is unknown, never consumed.
+//
+// A job with no prior re-dispatch has nothing to wait on, so the first
+// observation of a genuinely absent payload still repairs immediately.
+func runnerConsumedRedispatch(state *opsqueue.RunnerState, lastRedispatch time.Time) bool {
+	if lastRedispatch.IsZero() {
+		return true
+	}
+	if state == nil {
+		return false
+	}
+	cursor, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(state.Cursor))
+	if err != nil {
+		return false
+	}
+	return !cursor.Before(lastRedispatch)
+}
+
 // shouldRedispatchSyncedJob decides whether a job whose last_synced_status is
 // already "queued" must be reset and re-appended to the remote queue.
 //
@@ -816,13 +873,18 @@ func runIDsCompatible(want *int64, got int64) bool {
 //   - A failed transport, omitted row, malformed row, or R2 snapshot without a
 //     payload observation is unknown, never absence. Leave the durable dispatch
 //     in place and surface that uncertainty.
+//   - An observation the runner made before it consumed weft's previous
+//     re-dispatch of this job is unknown too: it reports the queue as it stood
+//     before that dispatch could land. Acting on it resets a dispatch that is
+//     still in flight and re-appends it, which is the shape of the observed
+//     re-dispatch loop (wj8973: 16 identical add commands in 33 minutes).
 //
 // The payload probe is consulted ONLY for the Pending branch. A failed probe
 // must never veto the state-only Finished/Running/Current branches: doing so
 // re-dispatched completed jobs whenever a single malformed payload line failed
 // the whole batch probe (fetchRemoteJobPayloads returns an error for the entire
 // batch on one unparseable line).
-func shouldRedispatchSyncedJob(job *db.Job, state *opsqueue.RunnerState, payloads map[int64]remoteJobPayload, payloadErr error) bool {
+func shouldRedispatchSyncedJob(job *db.Job, state *opsqueue.RunnerState, payloads map[int64]remoteJobPayload, payloadErr error, lastRedispatch time.Time) bool {
 	if job == nil {
 		return false
 	}
@@ -836,6 +898,9 @@ func shouldRedispatchSyncedJob(job *db.Job, state *opsqueue.RunnerState, payload
 		// the same probe remain independently actionable.
 		return false
 	}
+	if !runnerConsumedRedispatch(state, lastRedispatch) {
+		return false // the previous dispatch has not reached the runner yet
+	}
 	if state != nil && slices.Contains(state.Pending, job.ID) {
 		if !payload.exists {
 			return true
@@ -848,7 +913,7 @@ func shouldRedispatchSyncedJob(job *db.Job, state *opsqueue.RunnerState, payload
 	return payload.runIDOK
 }
 
-func syncedJobPublicationUnknownReason(job *db.Job, state *opsqueue.RunnerState, payloads map[int64]remoteJobPayload, payloadErr error) string {
+func syncedJobPublicationUnknownReason(job *db.Job, state *opsqueue.RunnerState, payloads map[int64]remoteJobPayload, payloadErr error, lastRedispatch time.Time) string {
 	if job == nil || queuedJobMaterializedInRunner(job, state, payloads) {
 		return ""
 	}
@@ -862,12 +927,27 @@ func syncedJobPublicationUnknownReason(job *db.Job, state *opsqueue.RunnerState,
 		}
 		return "remote queue publication status unknown: no per-job observation"
 	}
+	if !runnerConsumedRedispatch(state, lastRedispatch) {
+		return fmt.Sprintf(
+			"remote queue publication status unknown: runner has not consumed queue commands through the re-dispatch at %s (cursor %s); holding until it catches up",
+			lastRedispatch.UTC().Format(time.RFC3339), runnerCursorDescription(state))
+	}
 	if payload.exists {
 		if !payload.runIDOK && payload.detail != "" {
 			return "remote queue publication status unknown: " + payload.detail
 		}
 	}
 	return ""
+}
+
+func runnerCursorDescription(state *opsqueue.RunnerState) string {
+	if state == nil {
+		return "unpublished"
+	}
+	if cursor := strings.TrimSpace(state.Cursor); cursor != "" {
+		return cursor
+	}
+	return "unpublished"
 }
 
 // ensureQueuedJobsOnRemote pushes locally-queued jobs to the remote host.
@@ -909,14 +989,14 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		recordHostAgentRuntimeObservation(database, host, state, time.Now())
 	}
 
-	// Forward reconcile: re-dispatch syncedJobs that the runner doesn't know
-	// about. We gate on stateErr (not state) so the no-state-file case —
-	// runner not yet started, intentional (nil, nil) sentinel — still
-	// triggers re-dispatch: isJobInRunnerState(_, nil) returns false, so
-	// every syncedJob is treated as missing and reposted. AppendJobToQueue
-	// is idempotent, so a queue file that already holds the entry is
-	// unchanged. Only a genuine state-read failure (stateErr != nil) leaves
-	// the synced set untouched.
+	// Forward reconcile: re-dispatch syncedJobs the runner positively does
+	// not hold. Gated on stateErr (not state) because a read failure is
+	// unknown, while the (nil, nil) no-state-file sentinel is a real
+	// observation that the runner has not started. Absence is never inferred
+	// from the state snapshot alone: shouldRedispatchSyncedJob requires a
+	// per-job payload observation, and that observation must come from a
+	// runner that has already consumed weft's previous re-dispatch of the
+	// job. Everything else is recorded as unknown and left in place.
 	var payloads map[int64]remoteJobPayload
 	if stateErr == nil && len(syncedJobs) > 0 {
 		var payloadErr error
@@ -925,23 +1005,36 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			syncLog.Debug("could not read runner job payloads", "host", host, "error", payloadErr)
 		}
 		for _, job := range syncedJobs {
-			if !shouldRedispatchSyncedJob(job, state, payloads, payloadErr) {
-				if reason := syncedJobPublicationUnknownReason(job, state, payloads, payloadErr); reason != "" {
+			if job == nil {
+				continue
+			}
+			// When weft last re-dispatched this job. An observation the
+			// runner published before consuming that dispatch describes the
+			// queue as it stood beforehand and cannot report on it.
+			lastRedispatch := lastPublicationRedispatchAt(database, job.ID)
+			if !shouldRedispatchSyncedJob(job, state, payloads, payloadErr, lastRedispatch) {
+				if reason := syncedJobPublicationUnknownReason(job, state, payloads, payloadErr, lastRedispatch); reason != "" {
 					_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
 						EventKind: db.EventQueueDispatchDeferred,
 						JobID:     job.ID,
 						Detail:    truncateDispatchDetail(reason),
 					}, dispatchEventDedupeWindow)
 				}
-				continue // runner has it, or its pending run_id is unknown — leave it
+				continue // runner has it, or its publication status is unknown — leave it
 			}
-			// Runner confirmed the job absent. Reset so it gets re-dispatched below.
+			// Runner confirmed the job absent, and it has consumed queue
+			// commands through weft's previous re-dispatch, so the absence
+			// describes the dispatch weft actually made. Reset so it gets
+			// re-dispatched below.
 			syncLog.Debug("job missing from runner state, re-dispatching", "job_id", job.ID, "host", host)
-			_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+			// Recorded without dedupe: this row is the durable re-dispatch
+			// instant the fence above reads back, and a collapsed row would
+			// report an older one.
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 				EventKind: db.EventQueueDispatchDeferred,
 				JobID:     job.ID,
-				Detail:    "remote queue publication missing; re-dispatching",
-			}, dispatchEventDedupeWindow)
+				Detail:    redispatchPublicationMissingDetail,
+			})
 			if err := db.ResetLastSyncedStatus(database, job.ID); err != nil {
 				syncLog.Debug("failed to reset last_synced_status", "job_id", job.ID, "error", err)
 				continue

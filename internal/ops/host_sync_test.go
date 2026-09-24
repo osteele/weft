@@ -181,8 +181,74 @@ func TestShouldRedispatchSyncedJob(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldRedispatchSyncedJob(tc.job, tc.state, tc.payloads, tc.payloadErr); got != tc.wantRedispatch {
+			if got := shouldRedispatchSyncedJob(tc.job, tc.state, tc.payloads, tc.payloadErr, time.Time{}); got != tc.wantRedispatch {
 				t.Errorf("shouldRedispatchSyncedJob = %v, want %v", got, tc.wantRedispatch)
+			}
+		})
+	}
+}
+
+// TestShouldRedispatchSyncedJob_WaitsForRunnerToConsumePreviousDispatch pins
+// the fence between "the runner does not have this job" and "the runner has
+// not looked at our dispatch yet". The runner's cursor is the timestamp of
+// the last queue command it applied, stamped by this machine when the command
+// was created, so a cursor behind weft's last re-dispatch proves only that the
+// dispatch is still in flight. Treating that as a confirmed absence resets a
+// live dispatch and re-appends it every pass.
+func TestShouldRedispatchSyncedJob_WaitsForRunnerToConsumePreviousDispatch(t *testing.T) {
+	runID := int64(7)
+	job := &db.Job{ID: 5, LatestRunID: &runID}
+	payloads := map[int64]remoteJobPayload{5: {observed: true}} // confirmed missing
+	redispatchedAt := time.Date(2026, 9, 24, 0, 11, 0, 0, time.UTC)
+
+	cases := []struct {
+		name           string
+		cursor         string
+		lastRedispatch time.Time
+		wantRedispatch bool
+		wantUnknown    bool
+	}{
+		{
+			name:           "never re-dispatched acts on the first confirmed absence",
+			cursor:         redispatchedAt.Add(-time.Hour).Format(time.RFC3339Nano),
+			lastRedispatch: time.Time{},
+			wantRedispatch: true,
+		},
+		{
+			name:           "cursor behind the previous re-dispatch is unknown",
+			cursor:         redispatchedAt.Add(-30 * time.Second).Format(time.RFC3339Nano),
+			lastRedispatch: redispatchedAt,
+			wantRedispatch: false,
+			wantUnknown:    true,
+		},
+		{
+			name:           "cursor past the previous re-dispatch confirms the loss",
+			cursor:         redispatchedAt.Add(time.Second).Format(time.RFC3339Nano),
+			lastRedispatch: redispatchedAt,
+			wantRedispatch: true,
+		},
+		{
+			name:           "unpublished cursor is unknown, not consumed",
+			cursor:         "",
+			lastRedispatch: redispatchedAt,
+			wantRedispatch: false,
+			wantUnknown:    true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &opsqueue.RunnerState{Cursor: tc.cursor, Pending: []int64{5}}
+			got := shouldRedispatchSyncedJob(job, state, payloads, nil, tc.lastRedispatch)
+			if got != tc.wantRedispatch {
+				t.Errorf("shouldRedispatchSyncedJob = %v, want %v (cursor %q, last re-dispatch %v)",
+					got, tc.wantRedispatch, tc.cursor, tc.lastRedispatch)
+			}
+			reason := syncedJobPublicationUnknownReason(job, state, payloads, nil, tc.lastRedispatch)
+			if tc.wantUnknown && !strings.Contains(reason, "has not consumed queue commands") {
+				t.Errorf("unknown reason = %q, want the unconsumed-dispatch explanation", reason)
+			}
+			if !tc.wantUnknown && reason != "" {
+				t.Errorf("unknown reason = %q, want none", reason)
 			}
 		})
 	}
@@ -1334,6 +1400,111 @@ func TestEnsureQueuedJobsOnRemote_RedispatchesSyncedQueuedJobWithMissingPayload(
 	if appendCount != 1 {
 		t.Fatalf("appendCount = %d, want 1", appendCount)
 	}
+}
+
+// TestEnsureQueuedJobsOnRemote_DoesNotRedispatchDispatchStillInFlight is the
+// regression for the studio re-dispatch loop (wj8973 took 16 identical add
+// commands in 33 minutes for one attempt). Weft appends the add to the queue
+// and the runner materializes the payload only when it consumes that command.
+// Between those two moments the payload probe truthfully reports MISSING, and
+// reading that as "the runner lost the job" resets the durable dispatch and
+// re-appends it — forever, since every pass re-observes the same gap.
+//
+// The observable contract: while the runner's cursor is behind weft's last
+// re-dispatch, no new add command is sent and last_synced_status survives; a
+// deferral records the uncertainty. Once the cursor passes that instant the
+// absence is real evidence and the job is re-dispatched.
+func TestEnsureQueuedJobsOnRemote_DoesNotRedispatchDispatchStillInFlight(t *testing.T) {
+	workingDir := t.TempDir()
+	redispatchedAt := time.Now().Add(-2 * time.Minute)
+
+	// cursorOffset shifts the runner's command cursor relative to weft's
+	// recorded re-dispatch: behind it the dispatch is still in flight; past
+	// it the runner has applied every command weft sent.
+	run := func(t *testing.T, cursorOffset time.Duration) (appendCount, redispatchMarkers int, deferral string) {
+		t.Helper()
+		database := db.SetupTestDB(t)
+		jobID, err := db.RecordQueued(database, "test-host", workingDir, "echo hello", "in-flight dispatch")
+		if err != nil {
+			t.Fatalf("record queued job: %v", err)
+		}
+		if err := db.SetJobBackend(database, jobID, db.BackendQueueRunner); err != nil {
+			t.Fatalf("set backend: %v", err)
+		}
+		if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+			t.Fatalf("update last synced status: %v", err)
+		}
+		// Weft already reset and re-appended this job two minutes ago.
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind:  db.EventQueueDispatchDeferred,
+			JobID:      jobID,
+			OccurredAt: redispatchedAt.Unix(),
+			Detail:     redispatchPublicationMissingDetail,
+		}); err != nil {
+			t.Fatalf("record prior re-dispatch: %v", err)
+		}
+
+		t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+			return nil
+		}))
+		cursor := redispatchedAt.Add(cursorOffset).UTC().Format(time.RFC3339Nano)
+		mockSSHFunc(t, func(host, command string) (string, string, int) {
+			switch {
+			case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+				return fmt.Sprintf(`{"agent_version":"test-agent","queue_protocol_version":1,"cursor":%q,"pending":[%d],"current":null}`, cursor, jobID) + "\n", "", 0
+			case strings.Contains(command, "job-${id}.json"):
+				// The add command has not been consumed yet, so no payload
+				// file exists for it.
+				return fmt.Sprintf("%d\tMISSING\n", jobID), "", 0
+			case strings.Contains(command, `"op":"add"`):
+				appendCount++
+				return "", "", 0
+			default:
+				return "", "", 0
+			}
+		})
+
+		if _, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default()); err != nil {
+			t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
+		}
+		events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+			JobID: jobID, Kind: db.EventQueueDispatchDeferred, Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("list deferrals: %v", err)
+		}
+		for _, event := range events {
+			if event.Detail == redispatchPublicationMissingDetail {
+				redispatchMarkers++
+			} else if deferral == "" {
+				deferral = event.Detail
+			}
+		}
+		return appendCount, redispatchMarkers, deferral
+	}
+
+	t.Run("runner has not consumed the previous dispatch", func(t *testing.T) {
+		appendCount, redispatchMarkers, deferral := run(t, -30*time.Second)
+		if appendCount != 0 {
+			t.Errorf("appendCount = %d, want 0: weft re-dispatched a job whose add the runner has not read yet", appendCount)
+		}
+		if redispatchMarkers != 1 {
+			t.Errorf("recorded re-dispatches = %d, want 1 (only the pre-existing one): a dispatch still in flight was reset and re-appended", redispatchMarkers)
+		}
+		if !strings.Contains(deferral, "has not consumed queue commands") {
+			t.Errorf("deferral detail = %q, want the unconsumed-dispatch explanation", deferral)
+		}
+	})
+
+	t.Run("runner consumed it and still lacks the job", func(t *testing.T) {
+		appendCount, redispatchMarkers, _ := run(t, time.Second)
+		if appendCount != 1 {
+			t.Errorf("appendCount = %d, want 1: a genuinely lost job was not recovered", appendCount)
+		}
+		if redispatchMarkers != 2 {
+			t.Errorf("recorded re-dispatches = %d, want 2: the recovery was not recorded", redispatchMarkers)
+		}
+	})
 }
 
 func TestEnsureQueuedJobsOnRemote_SkipsPendingStatus(t *testing.T) {
