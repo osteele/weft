@@ -40,6 +40,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Terminal attempts are never reset in place**: A job that reaches a terminal
+  status while a dispatch pass is in flight keeps its recorded outcome; the
+  pass abandons its append and records `queue.dispatch.superseded` instead of
+  writing `queued` over the finished attempt. Re-asserting an attempt's
+  existing terminal status is now idempotent, so a job left in that state by
+  an earlier release settles on the next sync instead of failing every
+  completion write against the terminal-once index.
 - **Attempt-fenced completion sync**: Runner completion snapshots identify the
   exact attempt. Legacy job-only completions cannot terminate a newer retry,
   and a failed row update does not block synchronization of sibling jobs (wb178).

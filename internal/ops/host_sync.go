@@ -1181,6 +1181,18 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			Detail:    truncateDispatchDetail(detail),
 		}, dispatchEventDedupeWindow)
 	}
+	// A job that reached a terminal status mid-pass is not a dispatch failure
+	// and not a deferral: there is nothing left to retry. Recording it keeps
+	// the abandoned append visible without feeding the dispatch-failure
+	// counters that gate backoff and host cordoning.
+	recordSettledDuringDispatch := func(jobID int64, err error) {
+		syncLog.Debug("job settled during dispatch; not requeuing", "job_id", jobID, "host", host, "error", err)
+		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+			EventKind: db.EventQueueDispatchSuperseded,
+			JobID:     jobID,
+			Detail:    truncateDispatchDetail(err.Error()),
+		}, dispatchEventDedupeWindow)
+	}
 	for _, job := range jobs {
 		if _, failed := stageFailures[job.ID]; failed {
 			continue
@@ -1484,6 +1496,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			contacted = true
 			if outcome.resolved {
 				if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
+					if errors.Is(err, db.ErrAttemptAlreadyTerminal) {
+						recordSettledDuringDispatch(job.ID, err)
+						continue
+					}
 					return ensured, contacted, err
 				}
 				if err := db.SetQueuedAtNow(database, job.ID); err != nil {
@@ -1539,6 +1555,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		}
 		contacted = true
 		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
+			if errors.Is(err, db.ErrAttemptAlreadyTerminal) {
+				recordSettledDuringDispatch(job.ID, err)
+				continue
+			}
 			return ensured, contacted, err
 		}
 		if err := db.SetQueuedAtNow(database, job.ID); err != nil {

@@ -2058,10 +2058,41 @@ func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, newStatus string) error 
 	return UpdateAttemptStatusAndLastSynced(db, jobID, newStatus)
 }
 
+// ErrAttemptAlreadyTerminal reports that a job's latest attempt already
+// carries an execution outcome, so a reconcile-path reset back to
+// queued/draft was refused. Resetting it in place erases that outcome while
+// the attempt's job.terminal event survives, and the terminal-once index
+// then rejects every later completion write for that attempt id — the job
+// can never settle again (observed on wj8888: a dispatch pass that read the
+// job as queued wrote queued over an attempt that had completed mid-pass,
+// and settlement retried a guaranteed-to-fail write every sync for 19
+// hours). A deliberate requeue closes the attempt and opens a fresh one
+// instead; see RequeueByIDTx.
+var ErrAttemptAlreadyTerminal = errors.New("latest attempt is already terminal")
+
+// attemptHasRecordedOutcome reports whether an attempt status is one the
+// lifecycle triggers record as job.terminal. Narrower than
+// status.IsTerminal, which also counts draft: a draft attempt expects no
+// forward progress but records no outcome, and draft -> queued is the normal
+// unpause path.
+func attemptHasRecordedOutcome(s string) bool {
+	switch s {
+	case StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusSkipped:
+		return true
+	}
+	return false
+}
+
 // ClearPendingAndUpdateStatus clears pending status and updates both status fields.
 // Used when reconciliation succeeds or when accepting remote state.
 // Clears session_name for non-running states per spec: SessionImpliesRunning.
 func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, newStatus string) error {
+	if newStatus == StatusQueued || newStatus == StatusDraft {
+		if from := getAttemptStatus(db, jobID, false); attemptHasRecordedOutcome(from) {
+			return fmt.Errorf("%w: job %d attempt is %s, refusing reset to %s",
+				ErrAttemptAlreadyTerminal, jobID, from, newStatus)
+		}
+	}
 	if err := checkTransition(db, jobID, newStatus, false, status.SourceReconcile); err != nil {
 		return err
 	}

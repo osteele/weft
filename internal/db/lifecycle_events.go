@@ -120,6 +120,15 @@ const (
 	// inventory-host queue back to the unplaced pool after sustained dispatch
 	// failures made the current target a poor placement.
 	EventQueueDispatchAutoReplanned = "queue.dispatch.auto_replanned"
+	// EventQueueDispatchSuperseded records that a job settled while the
+	// dispatch pass that read it as queued was still running: the append
+	// succeeded, but by the time weft went to mark the job queued its latest
+	// attempt had already reached a terminal status. Writing queued over that
+	// attempt is what produced wj8888 — an attempt whose recorded outcome was
+	// erased while its job.terminal event survived, after which the
+	// terminal-once index rejected every later completion write. The dispatch
+	// is abandoned instead, and this event is what keeps that legible.
+	EventQueueDispatchSuperseded = "queue.dispatch.superseded"
 
 	// Queue completion settlement. EventQueueCompletionObserved records the
 	// first pass in which weft saw a host's runner report a terminal exit for
