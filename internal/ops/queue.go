@@ -82,6 +82,10 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 			return err
 		}
 	}
+	// state is non-nil here: queueProtocolCompatibilityError above refuses an
+	// unpublished state before any capability is consulted, and the caller in
+	// host_sync.go reaches this function through that same guard. The
+	// unobserved-state case is reported there, not here.
 	if len(artifactNeeds) > 0 && !state.Supports(opsqueue.CapabilityArtifactNeedV1) {
 		return errors.New(opsqueue.MissingRunnerCapabilityBlockDetail(
 			opsqueue.CapabilityArtifactNeedV1,

@@ -1115,9 +1115,15 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 				recordFailure(job.ID, "payload capability check failed", payloadListErr)
 				continue
 			}
-			if len(jobPayloads) > 0 && !state.Supports(opsqueue.CapabilityJobPayloadV1) {
-				recordDeferred(job.ID, capabilityRemedy(host, opsqueue.CapabilityJobPayloadV1), nil)
-				continue
+			if len(jobPayloads) > 0 {
+				if unknown := capabilityUnobservedDetail(host, state); unknown != "" {
+					recordDeferred(job.ID, unknown, nil)
+					continue
+				}
+				if !state.Supports(opsqueue.CapabilityJobPayloadV1) {
+					recordDeferred(job.ID, capabilityRemedy(host, opsqueue.CapabilityJobPayloadV1), nil)
+					continue
+				}
 			}
 		}
 
@@ -1236,10 +1242,15 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			}
 		}
 
-		if hasNamedAssetNeed(job.Needs) && (hostUsesR2Queue(host) || useR2Source) &&
-			!state.Supports(opsqueue.CapabilityArtifactNeedV1) {
-			recordDeferred(job.ID, capabilityRemedy(host, opsqueue.CapabilityArtifactNeedV1), nil)
-			continue
+		if hasNamedAssetNeed(job.Needs) && (hostUsesR2Queue(host) || useR2Source) {
+			if unknown := capabilityUnobservedDetail(host, state); unknown != "" {
+				recordDeferred(job.ID, unknown, nil)
+				continue
+			}
+			if !state.Supports(opsqueue.CapabilityArtifactNeedV1) {
+				recordDeferred(job.ID, capabilityRemedy(host, opsqueue.CapabilityArtifactNeedV1), nil)
+				continue
+			}
 		}
 
 		// Sync sources, deduplicated by remote path.
@@ -2499,6 +2510,29 @@ func scanHFCacheDuringSync(database *sql.DB, host string, timeout time.Duration)
 func capabilityRemedy(host, capability string) string {
 	return opsqueue.MissingRunnerCapabilityBlockDetail(capability,
 		fmt.Sprintf("run `weft queue update %s` to deploy a current agent", host))
+}
+
+// capabilityUnobservedDetail reports that weft could not read the host's
+// runner state, and is empty once a state has been observed.
+//
+// A nil state means the publication was absent, unreadable, or stale — never
+// that the runner said anything about its capabilities. Calling that a missing
+// capability inverts the evidence: it names the host as out of date and sends
+// the operator to `weft queue update`, which deploys a current agent over a
+// current agent and changes nothing. Reported live by two projects blocked on
+// studio, whose published state carried job-payload-v1 at the moment weft was
+// telling them the runner lacked it, and whose `weft queue update studio`
+// answered "agent binary already up-to-date".
+//
+// Dispatch still waits — fail closed on unknown — but the recorded reason says
+// which of the two it is.
+func capabilityUnobservedDetail(host string, state *opsqueue.RunnerState) string {
+	if state != nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%s has not published readable runner state; its capabilities are unknown, so dispatch is held until the host publishes again",
+		host)
 }
 
 // needsProducerArtifact reports whether any resolved need refers to another

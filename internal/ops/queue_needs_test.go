@@ -310,6 +310,51 @@ func TestR2QueueNeedsRequireCapability(t *testing.T) {
 	}
 }
 
+// A host that has published nothing readable has said nothing about its
+// capabilities. Reporting that as a missing capability names the host as out
+// of date and sends the operator to `weft queue update`, which redeploys a
+// current agent over a current agent: observed live on studio, where the
+// published state carried job-payload-v1 while weft claimed it did not.
+// Dispatch still waits; only the reason changes.
+func TestR2QueueUnreadableRunnerStateIsUnknownNotMissingCapability(t *testing.T) {
+	database, store, _ := setupR2QueueNeeds(t)
+	stateKey, err := inventoryqueue.StateKey("host-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(store.objects, stateKey)
+	if err := db.UpsertNamedAsset(database, db.NamedAsset{
+		Name: "trace", ContentHash: "hash", ContentType: "file", TargetPath: "data/trace",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job := recordR2NeedsConsumer(t, database, []string{"asset:trace"})
+	previousSourceSync := queueSourceSync
+	t.Cleanup(func() { queueSourceSync = previousSourceSync })
+	queueSourceSync = func(*db.Job, time.Duration) (string, error) { return "", nil }
+
+	if _, _, err := ensureQueuedJobsOnRemote(database, job.Host, time.Second, time.Second, slog.Default()); err != nil {
+		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
+	}
+
+	var detail string
+	if err := database.QueryRow(
+		`SELECT COALESCE(detail, '') FROM lifecycle_events WHERE job_id = ? AND event_kind = ? ORDER BY id DESC LIMIT 1`,
+		job.ID, db.EventQueueDispatchDeferred,
+	).Scan(&detail); err != nil {
+		t.Fatalf("read deferred dispatch reason: %v", err)
+	}
+	if opsqueue.IsMissingRunnerCapabilityBlock(detail) {
+		t.Fatalf("unobserved runner state was reported as a missing capability: %q", detail)
+	}
+	if !strings.Contains(detail, "unknown") || !strings.Contains(detail, job.Host) {
+		t.Fatalf("deferred reason does not report the host's capabilities as unknown: %q", detail)
+	}
+	if adds := r2QueueAdds(t, store); len(adds) != 0 {
+		t.Fatalf("job dispatched against an unobserved runner: %+v", adds)
+	}
+}
+
 func TestR2QueueProducerNeedRejectsMismatchedAttemptKey(t *testing.T) {
 	database, store, _ := setupR2QueueNeeds(t)
 	spec, _, runID := recordNeedProducerWithoutPublication(t, database, "")
