@@ -553,3 +553,244 @@ func TestApplyBatchStatusesR2FallbackWhenMarkerMissingAfterGracePeriod(t *testin
 		t.Fatalf("expected end time %d, got %v", finishedAt, result.EndTime)
 	}
 }
+
+func lifecycleEventsForJob(t *testing.T, database *sql.DB, jobID int64, kind string) []db.LifecycleEvent {
+	t.Helper()
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{Kind: kind, JobID: jobID})
+	if err != nil {
+		t.Fatalf("list %s events: %v", kind, err)
+	}
+	return events
+}
+
+// An older agent publishes a job-only finished entry with no run id. On a job
+// with a single attempt that entry admits exactly one reading, so the
+// completion settles rather than leaving the job reporting `running` forever.
+func TestApplyBatchStatusesSettlesUnfencedCompletionOnSingleAttemptJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "echo test", "unfenced completion")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	// The attempt must have been queued before the host says it finished;
+	// a completion that predates its attempt describes some earlier run.
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, 1700000000-600, jobID); err != nil {
+		t.Fatalf("backdate attempt: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	attempts, err := db.ListAttempts(database, jobID)
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("attempts = %d, %v; want exactly 1", len(attempts), err)
+	}
+
+	origSync := syncJobStatusFromR2ForBatch
+	t.Cleanup(func() { syncJobStatusFromR2ForBatch = origSync })
+	syncJobStatusFromR2ForBatch = func(_ *sql.DB, _ *db.Job) (SyncResult, error) {
+		return SyncResult{}, fmt.Errorf("R2 completion not found")
+	}
+
+	exitCode := 3
+	finishedAt := int64(1700000000)
+	statuses := map[int64]queueBatchStatus{
+		// RunID 0: the older agent's job-only entry.
+		jobID: {RunID: 0, ExitCode: &exitCode, Mtime: finishedAt, FromR2: true},
+	}
+
+	updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, effectiveQueueUnknownAfter(0), time.Unix(finishedAt+180, 0))
+	if err != nil {
+		t.Fatalf("applyBatchStatusesAt: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("updated = %d, want 1", updated)
+	}
+
+	result, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get result: %v", err)
+	}
+	if result.Status != db.StatusFailed || result.ExitCode == nil || *result.ExitCode != exitCode {
+		t.Fatalf("status=%s exit=%v, want failed with exit %d", result.Status, result.ExitCode, exitCode)
+	}
+	if result.EndTime == nil || *result.EndTime != finishedAt {
+		t.Fatalf("end time = %v, want %d", result.EndTime, finishedAt)
+	}
+	if events := lifecycleEventsForJob(t, database, jobID, db.EventQueueCompletionUnattributable); len(events) != 0 {
+		t.Fatalf("unattributable events = %d, want 0 for an unambiguous job", len(events))
+	}
+}
+
+// A single-attempt job is only unambiguous if the entry could have come from
+// that attempt. A job-only entry whose finish time predates the attempt's
+// queueing describes an earlier run of the same job id, so attributing it
+// would overwrite a live attempt with a stale outcome.
+func TestApplyBatchStatusesRefusesUnfencedCompletionOlderThanItsAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "echo test", "stale unfenced completion")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	finishedAt := int64(1700000000)
+	// The one live attempt was queued after the host-reported finish.
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, finishedAt+600, jobID); err != nil {
+		t.Fatalf("set attempt queued_at: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	origSync := syncJobStatusFromR2ForBatch
+	t.Cleanup(func() { syncJobStatusFromR2ForBatch = origSync })
+	syncJobStatusFromR2ForBatch = func(_ *sql.DB, _ *db.Job) (SyncResult, error) {
+		return SyncResult{}, fmt.Errorf("R2 completion not found")
+	}
+
+	exitCode := 0
+	statuses := map[int64]queueBatchStatus{
+		jobID: {RunID: 0, ExitCode: &exitCode, Mtime: finishedAt, FromR2: true},
+	}
+
+	updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, effectiveQueueUnknownAfter(0), time.Unix(finishedAt+1800, 0))
+	if err != nil {
+		t.Fatalf("applyBatchStatusesAt: %v", err)
+	}
+	if updated != 0 {
+		t.Fatalf("updated = %d, want 0: the completion predates the only attempt", updated)
+	}
+	result, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get result: %v", err)
+	}
+	if result.Status != db.StatusQueued || result.ExitCode != nil || result.EndTime != nil {
+		t.Fatalf("status=%s exit=%v end=%v, want the queued attempt untouched", result.Status, result.ExitCode, result.EndTime)
+	}
+	events := lifecycleEventsForJob(t, database, jobID, db.EventQueueCompletionUnattributable)
+	if len(events) != 1 {
+		t.Fatalf("unattributable events = %d, want 1", len(events))
+	}
+	if !strings.Contains(events[0].Detail, "predates") {
+		t.Fatalf("detail = %q, want the stale-finish reason", events[0].Detail)
+	}
+}
+
+// Same job-only entry, but the job has been retried, so the completion could
+// describe either attempt. Settling could close an attempt still running on
+// the host, so weft does not — and says so where a user can see it.
+func TestApplyBatchStatusesRefusesUnfencedCompletionOnMultiAttemptJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "echo test", "ambiguous completion")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	firstExit := 1
+	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &firstExit, 1699999000); err != nil {
+		t.Fatalf("close first attempt: %v", err)
+	}
+	if err := db.RequeueFreshAttemptByTarget(database, jobID, "studio", nil); err != nil {
+		t.Fatalf("fresh retry attempt: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	attempts, err := db.ListAttempts(database, jobID)
+	if err != nil || len(attempts) != 2 {
+		t.Fatalf("attempts = %d, %v; want 2", len(attempts), err)
+	}
+
+	origSync := syncJobStatusFromR2ForBatch
+	t.Cleanup(func() { syncJobStatusFromR2ForBatch = origSync })
+	syncJobStatusFromR2ForBatch = func(_ *sql.DB, _ *db.Job) (SyncResult, error) {
+		return SyncResult{}, fmt.Errorf("R2 completion not found")
+	}
+
+	exitCode := 0
+	finishedAt := int64(1700000000)
+	statuses := map[int64]queueBatchStatus{
+		jobID: {RunID: 0, ExitCode: &exitCode, Mtime: finishedAt, FromR2: true},
+	}
+
+	updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, effectiveQueueUnknownAfter(0), time.Unix(finishedAt+180, 0))
+	if err != nil {
+		t.Fatalf("applyBatchStatusesAt: %v", err)
+	}
+	if updated != 0 {
+		t.Fatalf("updated = %d, want 0 for an unattributable completion", updated)
+	}
+	result, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get result: %v", err)
+	}
+	if db.IsTerminalStatus(result.Status) {
+		t.Fatalf("status = %s, want a non-terminal status: the attempt was never identified", result.Status)
+	}
+
+	events := lifecycleEventsForJob(t, database, jobID, db.EventQueueCompletionUnattributable)
+	if len(events) != 1 {
+		t.Fatalf("unattributable events = %d, want 1", len(events))
+	}
+	if !strings.Contains(events[0].Detail, "cannot be attributed to an attempt") {
+		t.Fatalf("detail = %q, want the naming of the condition", events[0].Detail)
+	}
+	if !strings.Contains(events[0].Detail, "2 attempts") {
+		t.Fatalf("detail = %q, want the ambiguity reason", events[0].Detail)
+	}
+}
+
+// wb181: a 47-minute gap between a host-side END and the recorded end_time
+// could not be attributed afterwards because nothing recorded when weft first
+// saw the host's terminal state. This event is that timestamp; the gap to
+// end_time is the settlement latency.
+func TestApplyBatchStatusesRecordsFirstHostReportedFinishOnce(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "echo test", "finish observation")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	origSync := syncJobStatusFromR2ForBatch
+	t.Cleanup(func() { syncJobStatusFromR2ForBatch = origSync })
+	syncJobStatusFromR2ForBatch = func(_ *sql.DB, _ *db.Job) (SyncResult, error) {
+		return SyncResult{}, fmt.Errorf("R2 completion not found")
+	}
+
+	exitCode := 0
+	finishedAt := int64(1700000000)
+	statuses := map[int64]queueBatchStatus{
+		jobID: {RunID: *job.LatestRunID, ExitCode: &exitCode, Mtime: finishedAt, FromR2: true},
+	}
+
+	// Two passes inside the R2 grace period: the job stays unsettled, so the
+	// observation must not be re-recorded on every pass.
+	for pass := range 2 {
+		if _, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, effectiveQueueUnknownAfter(0), time.Unix(finishedAt+30, 0)); err != nil {
+			t.Fatalf("pass %d: applyBatchStatusesAt: %v", pass, err)
+		}
+	}
+
+	events := lifecycleEventsForJob(t, database, jobID, db.EventQueueCompletionObserved)
+	if len(events) != 1 {
+		t.Fatalf("observation events = %d, want 1", len(events))
+	}
+	wantFinish := time.Unix(finishedAt, 0).UTC().Format(time.RFC3339)
+	if !strings.Contains(events[0].Detail, wantFinish) {
+		t.Fatalf("detail = %q, want the host-reported finish time %s", events[0].Detail, wantFinish)
+	}
+	if !strings.Contains(events[0].Detail, fmt.Sprintf("attempt %d", *job.LatestRunID)) {
+		t.Fatalf("detail = %q, want the attempt it describes", events[0].Detail)
+	}
+}

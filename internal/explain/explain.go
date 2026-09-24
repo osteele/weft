@@ -174,6 +174,21 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		x.PrimaryReason = "job is starting"
 		x.SuggestedAction = "monitor startup"
 	case db.StatusRunning:
+		if event := latestUnattributableCompletion(database, job); event != nil {
+			// The row says running because weft declined to settle a
+			// completion it could not attribute — not because the host still
+			// has work in flight. Reporting "job is running" here would repeat
+			// the stale row back at the user.
+			x.State = "waiting"
+			x.Confidence = "high"
+			x.PrimaryReason = event.Detail
+			x.Evidence = append(x.Evidence, Evidence{
+				Label: "completion",
+				Value: fmt.Sprintf("unattributable, first seen %s ago", shortAge(now, time.Unix(event.OccurredAt, 0))),
+			})
+			x.SuggestedAction = "inspect the job's attempts and the host's runner state; weft will not close an attempt it cannot identify"
+			break
+		}
 		x.PrimaryReason = "job is running"
 		x.SuggestedAction = "monitor progress"
 	case db.StatusPaused:
@@ -376,6 +391,32 @@ func LatestInventoryDispatchBlock(database *sql.DB, job *db.Job, now time.Time) 
 	}
 	floor := db.DispatchRunFloor(job)
 	return db.LatestDispatchDisplayRun(database, job.ID, floor, now)
+}
+
+// latestUnattributableCompletion returns the most recent
+// EventQueueCompletionUnattributable for this job's current attempt, or nil.
+// The sync pass records that event when a host reports a job finished and
+// weft cannot tell which attempt ended; the job row stays non-terminal, so
+// without this the only reading available to a user is a `running` status
+// that will never resolve. The attempt floor keeps an event from a superseded
+// attempt out of the current explanation.
+func latestUnattributableCompletion(database *sql.DB, job *db.Job) *db.LifecycleEvent {
+	if database == nil || job == nil {
+		return nil
+	}
+	filter := db.LifecycleEventFilter{
+		Kind:  db.EventQueueCompletionUnattributable,
+		JobID: job.ID,
+		Limit: 1,
+	}
+	if floor := db.DispatchRunFloor(job); floor > 0 {
+		filter.Since = time.Unix(floor, 0)
+	}
+	event, err := db.LatestLifecycleEvent(database, filter)
+	if err != nil {
+		return nil
+	}
+	return event
 }
 
 func SummaryLine(x Explanation) string {

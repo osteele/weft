@@ -314,6 +314,7 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 			updated++
 		default:
 			if status.ExitCode != nil {
+				recordHostReportedFinish(database, job, status)
 				if status.FromR2 {
 					result, err := syncJobStatusFromR2ForBatch(database, job)
 					if err != nil {
@@ -324,23 +325,31 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 						if since <= 0 && job.CreatedAt > 0 {
 							since = job.CreatedAt
 						}
-						// An old agent's job-only finished entry cannot identify
-						// which attempt ended, even after the grace period.
-						if status.RunID != 0 && since > 0 && now.Sub(time.Unix(since, 0)) >= r2CompletionMarkerGracePeriod {
-							slog.Warn("R2 completion record unavailable; using exact-attempt runner completion", "component", "sync", "job_id", job.ID, "run_id", status.RunID, "exit_code", *status.ExitCode, "error", err)
-							recordQueueDispatchOK(database, job.ID)
-							endTime := status.Mtime
-							if endTime <= 0 {
-								endTime = now.Unix()
-							}
-							if recErr := RecordJobAttemptCompletion(database, job.ID, status.RunID, *status.ExitCode, job.StartTime, endTime); recErr != nil {
-								recordError(jobID, recErr)
-								continue
-							}
-							updated++
+						if since <= 0 || now.Sub(time.Unix(since, 0)) < r2CompletionMarkerGracePeriod {
+							slog.Debug("R2 runner reported completion before result marker was readable", "component", "sync", "job_id", job.ID, "error", err)
 							continue
 						}
-						slog.Debug("R2 runner reported completion before result marker was readable", "component", "sync", "job_id", job.ID, "error", err)
+						attemptID, ambiguity := attributeRunnerCompletion(database, job, status.RunID, status.Mtime)
+						if attemptID == 0 {
+							// Settling here could close the wrong attempt, so
+							// weft does not. Recording the refusal is what
+							// keeps the job from reporting `running` forever
+							// with no trace outside a debug log.
+							recordUnattributableCompletion(database, job.ID, ambiguity)
+							slog.Warn("R2 completion record unavailable and runner completion cannot be attributed to an attempt", "component", "sync", "job_id", job.ID, "reason", ambiguity, "error", err)
+							continue
+						}
+						slog.Warn("R2 completion record unavailable; using attributed runner completion", "component", "sync", "job_id", job.ID, "run_id", attemptID, "exit_code", *status.ExitCode, "error", err)
+						recordQueueDispatchOK(database, job.ID)
+						endTime := status.Mtime
+						if endTime <= 0 {
+							endTime = now.Unix()
+						}
+						if recErr := RecordJobAttemptCompletion(database, job.ID, attemptID, *status.ExitCode, job.StartTime, endTime); recErr != nil {
+							recordError(jobID, recErr)
+							continue
+						}
+						updated++
 						continue
 					}
 					if result.Updated {
@@ -415,6 +424,119 @@ func recordPreflightDispatchBlock(database *sql.DB, jobID int64, detail string) 
 		EventKind: db.EventQueueDispatchFailed,
 		JobID:     jobID,
 		Detail:    truncateDispatchDetail(detail),
+	}, dispatchEventDedupeWindow)
+}
+
+// attributeRunnerCompletion resolves which attempt a runner-reported terminal
+// exit belongs to, for the fallback path where the R2 completion record could
+// not be read and the runner's word is the only evidence available.
+//
+// A run id in the runner's entry is authoritative. Older agents publish a
+// job-only entry that carries none; that is an absent observation, not a
+// statement that the job has no attempt. Two things have to hold before such
+// an entry can be placed:
+//
+//   - The job has exactly one live attempt. With several (a retried job) the
+//     entry is genuinely ambiguous, and settling risks closing an attempt that
+//     is still running on the host.
+//   - The reported finish time falls inside that attempt's window. An entry
+//     that predates the attempt's queueing describes some earlier run of the
+//     same job id, so attributing it would overwrite a live retry with a
+//     stale outcome. An entry with no finish time at all cannot be placed
+//     either way, and unknown is not evidence.
+//
+// Returns (attemptID, "") when attributable, and (0, reason) when not.
+func attributeRunnerCompletion(database *sql.DB, job *db.Job, runID, finishedAt int64) (int64, string) {
+	if runID != 0 {
+		return runID, ""
+	}
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil {
+		return 0, "attempt history unreadable: " + err.Error()
+	}
+	switch len(attempts) {
+	case 0:
+		return 0, "runner published no run id and the job has no recorded attempt"
+	case 1:
+	default:
+		return 0, fmt.Sprintf("runner published no run id and the job has %d attempts", len(attempts))
+	}
+	attempt := attempts[0]
+	if finishedAt <= 0 {
+		return 0, "runner published no run id and no finish time"
+	}
+	if start := attemptWindowStart(attempt); start > 0 && finishedAt < start {
+		return 0, fmt.Sprintf("runner published no run id and its finish time predates the job's only attempt by %s",
+			time.Duration(start-finishedAt)*time.Second)
+	}
+	return attempt.ID, ""
+}
+
+// attemptWindowStart is the earliest moment an attempt could have produced a
+// completion: its queueing, or its start when the queueing time is unrecorded.
+func attemptWindowStart(attempt db.JobAttempt) int64 {
+	if attempt.QueuedAt != nil && *attempt.QueuedAt > 0 {
+		return *attempt.QueuedAt
+	}
+	if attempt.StartTime != nil && *attempt.StartTime > 0 {
+		return *attempt.StartTime
+	}
+	return 0
+}
+
+// recordUnattributableCompletion surfaces a completion weft refuses to settle.
+// Without it the refusal lived only in a slog.Debug, so a job in this state
+// reported `running` indefinitely with nothing for `weft status`, `weft
+// diagnose`, or `weft log --events` to show.
+func recordUnattributableCompletion(database *sql.DB, jobID int64, reason string) {
+	detail := "host reports this job finished; the completion cannot be attributed to an attempt"
+	if reason != "" {
+		detail += " (" + reason + ")"
+	}
+	_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueCompletionUnattributable,
+		JobID:     jobID,
+		Detail:    truncateDispatchDetail(detail),
+	}, dispatchEventDedupeWindow)
+}
+
+// recordHostReportedFinish records the first pass in which weft saw a runner
+// report a terminal exit for a job whose row is not yet terminal, carrying the
+// finish time the host reported.
+//
+// Nothing else in the pipeline records when the observation was made, so a
+// settlement delay (wb181: 47 minutes between a host-side END and the recorded
+// end_time) could not afterwards be split into "the host told us late" and
+// "we were told and took this long". The gap between this event and end_time
+// is that second half.
+//
+// A stale run id describes a superseded attempt, not this one, so it is not an
+// observation of the current attempt finishing. An absent mtime means the
+// host-reported finish time was not observed; it is recorded as unknown rather
+// than filled in with the clock, which would silently pass off weft's own
+// observation time as the host's.
+//
+// Deduped the same way as the dispatch events: the detail is stable for a
+// given attempt, so repeated passes over an unsettled job collapse.
+func recordHostReportedFinish(database *sql.DB, job *db.Job, status queueBatchStatus) {
+	if job == nil || status.ExitCode == nil || db.IsTerminalStatus(job.Status) {
+		return
+	}
+	if status.RunID != 0 && job.LatestRunID != nil && status.RunID != *job.LatestRunID {
+		return
+	}
+	attempt := status.RunID
+	if attempt == 0 && job.LatestRunID != nil {
+		attempt = *job.LatestRunID
+	}
+	finish := "unknown"
+	if status.Mtime > 0 {
+		finish = time.Unix(status.Mtime, 0).UTC().Format(time.RFC3339)
+	}
+	_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueCompletionObserved,
+		JobID:     job.ID,
+		Detail:    truncateDispatchDetail(fmt.Sprintf("attempt %d: host reported exit %d, host finish time %s", attempt, *status.ExitCode, finish)),
 	}, dispatchEventDedupeWindow)
 }
 

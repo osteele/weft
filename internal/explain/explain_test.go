@@ -539,3 +539,50 @@ func TestQueuedDispatchEvidenceIsScopedToCurrentJobRequest(t *testing.T) {
 		t.Fatalf("failed history lookup asserted a known queue condition: %+v", x)
 	}
 }
+
+// A running row that the sync pass has already refused to settle must not be
+// explained as "job is running": the host says it finished, and weft declined
+// to attribute the completion. Without this the condition was invisible to
+// `weft status` and `weft diagnose`.
+func TestForJobExplainsUnattributableCompletionOnRunningJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "cool30", "/tmp/project", "python train.py", "running")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	now := time.Unix(20_000, 0)
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, now.Add(-time.Hour).Unix(), jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	if x := ForJob(database, job, now); x.PrimaryReason != "job is running" {
+		t.Fatalf("PrimaryReason = %q, want the plain running explanation before any refusal", x.PrimaryReason)
+	}
+
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		OccurredAt: now.Add(-30 * time.Minute).Unix(),
+		EventKind:  db.EventQueueCompletionUnattributable,
+		JobID:      jobID,
+		Detail:     "host reports this job finished; the completion cannot be attributed to an attempt (runner published no run id and the job has 2 attempts)",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	x := ForJob(database, job, now)
+	if !strings.Contains(x.PrimaryReason, "cannot be attributed to an attempt") {
+		t.Fatalf("PrimaryReason = %q, want the unattributable completion", x.PrimaryReason)
+	}
+	if x.State != "waiting" || x.Confidence != "high" {
+		t.Fatalf("State=%q Confidence=%q, want waiting/high so status and diagnose surface it", x.State, x.Confidence)
+	}
+	if x.SuggestedAction == "monitor progress" {
+		t.Fatalf("SuggestedAction = %q, want something other than monitoring a job the host says has finished", x.SuggestedAction)
+	}
+}

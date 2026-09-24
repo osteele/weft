@@ -121,6 +121,23 @@ const (
 	// failures made the current target a poor placement.
 	EventQueueDispatchAutoReplanned = "queue.dispatch.auto_replanned"
 
+	// Queue completion settlement. EventQueueCompletionObserved records the
+	// first pass in which weft saw a host's runner report a terminal exit for
+	// a job whose row was still non-terminal, carrying the host-reported
+	// finish time. Nothing else records when the observation was made, so the
+	// gap between this event and the eventual end_time is the only way to
+	// attribute settlement latency to a phase after the fact (wb181: 47
+	// minutes between a host-side END and the recorded end_time, unpinnable).
+	//
+	// EventQueueCompletionUnattributable records that the runner reports the
+	// job finished while weft cannot tell which attempt ended — an older
+	// agent's job-only entry against a job with several live attempts.
+	// Settling would risk terminating the wrong attempt, so weft does not;
+	// this event is what keeps that refusal legible instead of leaving the
+	// job reporting `running` with no trace outside debug logs.
+	EventQueueCompletionObserved       = "queue.completion.observed"
+	EventQueueCompletionUnattributable = "queue.completion.unattributable"
+
 	// EventCheckpointAutoPublishAttempt records one checkpoint auto-publish
 	// attempt. The Detail carries the per-(job, asset) attempt key and JobID
 	// the job it gates, so the cooldown can be re-derived from the most recent
