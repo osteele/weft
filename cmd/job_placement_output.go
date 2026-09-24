@@ -54,19 +54,33 @@ func placementSummary(job *db.Job) string {
 }
 
 func queueReasonSummary(database *sql.DB, job *db.Job) string {
+	unknown := unpublishedQueueReason(database, job, time.Now())
 	// A recorded blocker outranks queue position for placed targets: both
 	// can be true at once, but naming the ahead job as the cause sends the
 	// operator to act on a job that is not the problem. Unplaced jobs keep
 	// the diagnose-pointing handling in the switch below.
+	//
+	// It outranks an unobserved queue for the same reason, and the case is
+	// not hypothetical: a host that stops publishing often stops because the
+	// very thing the blocker names has failed, so suppressing it would hide
+	// the most actionable line exactly when it is most likely to be true. A
+	// blocker is recorded on this job's own row, not derived from other jobs'
+	// rows, so an unread queue does not make it less true.
 	if database != nil {
 		switch job.TargetKind() {
 		case db.JobTargetInventoryHost, db.JobTargetRentalInstance:
 			if blocker := recordedBlocker(database, job); blocker != "" {
+				if unknown != "" {
+					return fmt.Sprintf("%s (%s)", blocker, unknown)
+				}
 				if running := runningJobAhead(database, job); running != nil {
 					return fmt.Sprintf("%s (also waiting behind %s)", blocker, ids.FormatJobID(running.ID))
 				}
 				return blocker
 			}
+		}
+		if unknown != "" {
+			return unknown
 		}
 		if running := runningJobAhead(database, job); running != nil {
 			return "waiting behind " + ids.FormatJobID(running.ID)
@@ -114,6 +128,69 @@ func queueBlockedReasonSummary(job *db.Job) string {
 	display := queueblock.Display(job, nil)
 	if display.Kind != "" && display.Reason != "" {
 		return display.Kind + ": " + display.Reason
+	}
+	return ""
+}
+
+// unpublishedQueueReason reports that an inventory host's queue is unobserved,
+// and is empty whenever weft has a fresh publication to reason from.
+//
+// Queue position is derived from other jobs' rows, and those rows are only as
+// current as the host's last published runner state. While that publication is
+// missing or stale, weft knows nothing about the order on that host — including
+// whether the jobs it would name as ahead are still running. Naming one asserts
+// an order nobody observed, and the assertion outlives the execution it
+// describes: reported as wb181, where status printed "waiting behind wj8967"
+// and a growing wait for a job that had already failed on the host, while
+// wj8967 itself had completed.
+//
+// Absence of a publication is not absence of progress, so this says unknown
+// rather than naming a cause or a position. It speaks only where weft has a
+// positive observation that has since gone stale; a host weft has never
+// observed at all is left to the dispatch-side reasons below, which already
+// distinguish a stopped daemon from a waiting one.
+//
+// It also stays quiet until the job is actually on the host's queue. A stopped
+// daemon both halts dispatch and ages the publication past the freshness
+// bound, so for a job still waiting to be dispatched the two conditions arrive
+// together — and of the two, "daemon stopped" is the one the operator can act
+// on. Reporting an unobserved queue there would replace an actionable cause
+// with a true but useless observation about a queue the job has not reached.
+func unpublishedQueueReason(database *sql.DB, job *db.Job, now time.Time) string {
+	if database == nil || job == nil || job.TargetKind() != db.JobTargetInventoryHost || job.Host == "" {
+		return ""
+	}
+	if job.LastSyncedStatus != db.StatusQueued {
+		return ""
+	}
+	states, err := db.ListHostAgentStates(database)
+	if err != nil {
+		return ""
+	}
+	for _, state := range states {
+		if state.Host != job.Host {
+			continue
+		}
+		if state.RunningObservedAt <= 0 {
+			break
+		}
+		age := now.Sub(time.Unix(state.RunningObservedAt, 0))
+		// A future-dated observation is clock skew between whoever recorded it
+		// and this process, so it establishes nothing about the host's queue —
+		// classifyHostAgentStatus reaches the same conclusion and reports it as
+		// a stale observation. Accepting it as fresh would assert an order from
+		// a row weft's own agent-status calls untrustworthy.
+		if age < 0 {
+			return fmt.Sprintf(
+				"%s last published runner state at a future timestamp; queue position and progress on it are unknown",
+				job.Host)
+		}
+		if age <= hostAgentRuntimeFreshness {
+			return ""
+		}
+		return fmt.Sprintf(
+			"%s last published runner state %s ago; queue position and progress on it are unknown",
+			job.Host, formatAgentObservationAge(age))
 	}
 	return ""
 }
@@ -195,20 +272,29 @@ func queuedAction(database *sql.DB, job *db.Job) string {
 		return "wait; autopilot owns placement, monitor with weft status " + ids.FormatJobID(job.ID) + " --wait"
 	}
 	monitor := "monitor with weft status " + ids.FormatJobID(job.ID) + " --wait"
+	unknown := unpublishedQueueReason(database, job, time.Now())
 	behind := ""
-	if database != nil {
+	if database != nil && unknown == "" {
 		if running := runningJobAhead(database, job); running != nil {
 			behind = "queued behind " + ids.FormatJobID(running.ID)
 		}
 	}
 	// The operative blocker comes first. Head-of-line position survives
 	// only as parenthetical context; pointing the reader at the ahead job
-	// as the cause is how a blocked job's diagnosis goes wrong.
+	// as the cause is how a blocked job's diagnosis goes wrong. An unobserved
+	// queue is reported the same way: it qualifies the blocker rather than
+	// replacing it, because the blocker is recorded on this job's own row.
 	if blocker := recordedBlocker(database, job); blocker != "" {
-		if behind != "" {
+		switch {
+		case unknown != "":
+			return "wait; " + blocker + " (" + unknown + "), " + monitor
+		case behind != "":
 			return "wait; " + blocker + " (also " + behind + "), " + monitor
 		}
 		return "wait; " + blocker + ", " + monitor
+	}
+	if unknown != "" {
+		return "wait; " + unknown + ", " + monitor
 	}
 	if behind != "" {
 		return "wait; " + behind + ", " + monitor

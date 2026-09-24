@@ -146,6 +146,121 @@ func TestQueueReasonSummaryHeadOfLinePhrasingUnchangedWithoutBlocker(t *testing.
 	}
 }
 
+// wb181: status named wj8967 as the job ahead, and kept a growing wait, for a
+// job that had already failed on studio — while wj8967 had itself completed.
+// Both rows were stale because the host had stopped publishing runner state.
+// Queue position is only as good as that publication, so while it is stale the
+// answer is "unknown", not a job id.
+func TestQueueReasonSummaryRefusesPositionWhileHostPublicationIsStale(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name        string
+		observedAgo time.Duration
+		wantUnknown bool
+	}{
+		{name: "fresh publication keeps the position", observedAgo: time.Minute},
+		{name: "stale publication withholds it", observedAgo: hostAgentRuntimeFreshness + time.Minute, wantUnknown: true},
+		{name: "future-dated observation is not fresh", observedAgo: -time.Hour, wantUnknown: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db.SetupTestDB(t)
+			aheadID, queuedID := createInventoryRunningAheadPair(t, database)
+			if err := db.RecordHostAgentRuntime(database, "host-alpha", "agent-v1", 1, now.Add(-tc.observedAgo)); err != nil {
+				t.Fatalf("RecordHostAgentRuntime: %v", err)
+			}
+			job, err := db.GetJobByID(database, queuedID)
+			if err != nil {
+				t.Fatalf("GetJobByID: %v", err)
+			}
+			// The job is on the host's queue; an undispatched one is covered
+			// by TestQueueReasonSummaryLeavesUndispatchedJobsToDispatchReasons.
+			job.LastSyncedStatus = db.StatusQueued
+
+			reason := queueReasonSummary(database, job)
+			action := queuedAction(database, job)
+			ahead := ids.FormatJobID(aheadID)
+			if !tc.wantUnknown {
+				if reason != "waiting behind "+ahead || !strings.Contains(action, "queued behind "+ahead) {
+					t.Fatalf("fresh publication lost the position: reason=%q action=%q", reason, action)
+				}
+				return
+			}
+			if strings.Contains(reason, ahead) || strings.Contains(action, ahead) {
+				t.Fatalf("named a job ahead from an unobserved queue: reason=%q action=%q", reason, action)
+			}
+			for _, text := range []string{reason, action} {
+				if !strings.Contains(text, "host-alpha") || !strings.Contains(text, "unknown") {
+					t.Fatalf("stale publication was not reported as unknown: %q", text)
+				}
+			}
+		})
+	}
+}
+
+// A stopped daemon halts dispatch and ages the publication together, so for a
+// job that has not reached the host's queue the unobserved-queue observation
+// would displace the one cause an operator can act on.
+func TestQueueReasonSummaryLeavesUndispatchedJobsToDispatchReasons(t *testing.T) {
+	database := db.SetupTestDB(t)
+	queuedID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp", "echo queued", "queued job", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.RecordHostAgentRuntime(database, "host-alpha", "agent-v1", 1,
+		time.Now().Add(-(hostAgentRuntimeFreshness + time.Hour))); err != nil {
+		t.Fatalf("RecordHostAgentRuntime: %v", err)
+	}
+	job, err := db.GetJobByID(database, queuedID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	job.LastSyncedStatus = ""
+
+	reason := queueReasonSummary(database, job)
+	if strings.Contains(reason, "queue position") {
+		t.Fatalf("undispatched job was told its queue position is unknown: %q", reason)
+	}
+	if !strings.Contains(reason, "daemon") {
+		t.Fatalf("queue reason = %q, want the dispatch-side daemon reason", reason)
+	}
+}
+
+// A host that stops publishing often stops because the thing the blocker names
+// has failed, so the unobserved queue must qualify the blocker rather than
+// replace it: the blocker is recorded on this job's own row and an unread
+// queue does not make it less true.
+func TestQueueReasonSummaryKeepsRecordedBlockerWhilePublicationIsStale(t *testing.T) {
+	database := db.SetupTestDB(t)
+	aheadID, queuedID := createInventoryRunningAheadPair(t, database)
+	if err := db.RecordHostAgentRuntime(database, "host-alpha", "agent-v1", 1,
+		time.Now().Add(-(hostAgentRuntimeFreshness + time.Minute))); err != nil {
+		t.Fatalf("RecordHostAgentRuntime: %v", err)
+	}
+	job, err := db.GetJobByID(database, queuedID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	job.LastSyncedStatus = db.StatusQueued
+	job.QueueBlockedReason = "remote publication failed: ssh timeout"
+
+	reason := queueReasonSummary(database, job)
+	action := queuedAction(database, job)
+	for _, text := range []string{reason, action} {
+		if !strings.Contains(text, "remote publication failed") {
+			t.Fatalf("stale publication suppressed the recorded blocker: %q", text)
+		}
+		if !strings.Contains(text, "unknown") {
+			t.Fatalf("blocker dropped the unobserved-queue qualifier: %q", text)
+		}
+		if strings.Contains(text, ids.FormatJobID(aheadID)) {
+			t.Fatalf("named a job ahead from an unobserved queue: %q", text)
+		}
+		if blockerAt, unknownAt := strings.Index(text, "remote publication failed"), strings.Index(text, "unknown"); unknownAt < blockerAt {
+			t.Fatalf("unobserved-queue qualifier preceded the operative blocker: %q", text)
+		}
+	}
+}
+
 func TestQueueReasonSummaryUnplacedKeepsDiagnosePointer(t *testing.T) {
 	// Guard: the blocker-first ordering is scoped to placed targets. An
 	// unplaced job keeps the phrasing that points at weft diagnose.
