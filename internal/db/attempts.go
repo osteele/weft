@@ -1128,13 +1128,16 @@ func UpdateAttemptStatusAndLastSynced(execer dbExecer, jobID int64, status strin
 }
 
 // ClearAttemptPendingAndUpdateStatus reconciles pending_status by clearing it
-// and updating status + last_synced_status on the latest open attempt.
+// and updating status + last_synced_status on the latest attempt.
 // Guard is caller-side: ClearPendingAndUpdateStatus runs checkTransition
-// before this write; the queued/draft branch deliberately resets a closed
-// attempt (requeue semantics), which is why it uses latestAttemptSubquery.
+// before this write, and refuses the queued/draft branch outright when the
+// latest attempt carries a recorded outcome (ErrAttemptAlreadyTerminal). A
+// requeue closes the finished attempt and opens a fresh one instead; see
+// RequeueByIDTx.
 func ClearAttemptPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
-	// Use latestAttemptSubquery because this can reset a closed (terminal)
-	// attempt back to queued/draft status.
+	// latestAttemptSubquery rather than the open-attempt form: the reset
+	// reaches a draft or pending attempt that is closed but carries no
+	// outcome. An attempt with an outcome never arrives here.
 	if status == StatusQueued || status == StatusDraft {
 		// When going back to queued/draft, clear all execution fields
 		_, err := db.Exec(`
