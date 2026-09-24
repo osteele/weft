@@ -73,6 +73,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   immutable source pin no longer attempts a mutable source push, which failed
   against scoped task snapshots and blocked the edit. The queue update still
   applies and the recorded pin is untouched (wb180).
+- **Re-dispatch held until the runner catches up**: A payload absence observed
+  before the runner consumed weft's previous re-dispatch is treated as unknown
+  rather than as a lost job, so a dispatch in flight is no longer reset and
+  re-appended on every sync pass.
+- **Unattributable completions**: A job-only completion is settled when the job
+  has exactly one live attempt and the reported finish falls inside it.
+  Genuinely ambiguous completions record a visible event that `weft status` and
+  `weft diagnose` render, instead of a debug line and an indefinitely running
+  row. Each attempt also records when weft first observed a host-reported
+  terminal exit, so settlement latency is attributable.
 
 - **Artifact dependency failure isolation**: Confirmed missing or failed
   producer artifacts fail the rental consumer with a dependency diagnosis.
