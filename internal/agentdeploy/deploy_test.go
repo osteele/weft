@@ -3,6 +3,7 @@ package agentdeploy
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -335,6 +336,74 @@ func TestLocalAgentVersion_HashFormatAndStability(t *testing.T) {
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{12}$`).MatchString(version1) {
 		t.Fatalf("LocalAgentVersion = %q, want 12 lowercase hex chars", version1)
+	}
+}
+
+func TestAgentVersionKindOf(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    AgentVersionKind
+	}{
+		{version: "", want: AgentVersionAbsent},
+		{version: "   ", want: AgentVersionAbsent},
+		{version: "ebcd26823c30", want: AgentVersionSourceHash},
+		{version: "vcs-78ce3e6cd135", want: AgentVersionRevisionFallback},
+	} {
+		if got := AgentVersionKindOf(tc.version); got != tc.want {
+			t.Fatalf("AgentVersionKindOf(%q) = %v, want %v", tc.version, got, tc.want)
+		}
+	}
+}
+
+// The identities are compared across processes with different environments.
+// One that cannot run `go list` names a revision instead of hashing the source,
+// and that identity disagrees with the source hash of the same tree. Treating
+// the disagreement as staleness overwrote a verified deployment on studio and
+// re-execed its runner, so a fallback must decide nothing.
+func TestDecideAgentDeployRefusesToJudgeSourceBuildFromRevisionIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		local, remote string
+		want          agentDeployDecision
+	}{
+		{name: "identical source hashes", local: "ebcd26823c30", remote: "ebcd26823c30", want: agentDeployUpToDate},
+		{name: "identical revisions", local: "vcs-78ce3e6cd135", remote: "vcs-78ce3e6cd135", want: agentDeployUpToDate},
+		{name: "source hash supersedes revision", local: "ebcd26823c30", remote: "vcs-78ce3e6cd135", want: agentDeployProceed},
+		{name: "revision cannot judge source hash", local: "vcs-78ce3e6cd135", remote: "ebcd26823c30", want: agentDeployIndeterminate},
+		{name: "differing source hashes", local: "ebcd26823c30", remote: "fa0161f3224d", want: agentDeployProceed},
+		{name: "differing revisions", local: "vcs-78ce3e6cd135", remote: "vcs-0008db9dc5f2", want: agentDeployProceed},
+		{name: "nothing installed", local: "vcs-78ce3e6cd135", remote: "", want: agentDeployProceed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := decideAgentDeploy(tc.local, tc.remote); got != tc.want {
+				t.Fatalf("decideAgentDeploy(%q, %q) = %v, want %v", tc.local, tc.remote, got, tc.want)
+			}
+		})
+	}
+}
+
+// The marking has to survive the real fallback path: a repo root where the
+// source hash cannot be computed must yield an identity that later comparisons
+// can recognize as a revision.
+func TestAgentVersionFromRepoRootMarksRevisionFallback(t *testing.T) {
+	repoRoot := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "--allow-empty", "-m", "empty"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("git unavailable for revision-fallback coverage: %v\n%s", err, out)
+		}
+	}
+
+	version, err := agentVersionFromRepoRoot(repoRoot)
+	if err != nil {
+		t.Fatalf("agentVersionFromRepoRoot: %v", err)
+	}
+	if AgentVersionKindOf(version) != AgentVersionRevisionFallback {
+		t.Fatalf("fallback identity %q is indistinguishable from a source hash", version)
 	}
 }
 

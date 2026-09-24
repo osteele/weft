@@ -26,6 +26,44 @@ const (
 	installedAgentIdentitySuffix        = ".agent-version.json"
 )
 
+// revisionFallbackPrefix marks an identity that names a revision instead of
+// hashing the agent's source bytes.
+const revisionFallbackPrefix = "vcs-"
+
+// AgentVersionKind separates the two things an agent identity can be. A source
+// hash describes the bytes, so every process that can compute it derives the
+// same value from the same tree. A revision fallback only names a commit, so
+// it disagrees with the source hash of the very tree it was computed from.
+//
+// The kinds must stay distinguishable because they are compared across
+// processes with different environments: one that can run `go list` produces a
+// hash, one that cannot produces a fallback. Left unmarked, that disagreement
+// is indistinguishable from a genuinely older build, so the weaker process
+// overwrites the stronger one's deployment and re-execs the runner on every
+// pass.
+type AgentVersionKind int
+
+const (
+	// AgentVersionAbsent is an empty identity: nothing was observed.
+	AgentVersionAbsent AgentVersionKind = iota
+	// AgentVersionSourceHash identifies the agent's source bytes.
+	AgentVersionSourceHash
+	// AgentVersionRevisionFallback names a revision only.
+	AgentVersionRevisionFallback
+)
+
+// AgentVersionKindOf classifies an agent identity string.
+func AgentVersionKindOf(version string) AgentVersionKind {
+	switch {
+	case strings.TrimSpace(version) == "":
+		return AgentVersionAbsent
+	case strings.HasPrefix(version, revisionFallbackPrefix):
+		return AgentVersionRevisionFallback
+	default:
+		return AgentVersionSourceHash
+	}
+}
+
 type installedAgentIdentity struct {
 	SchemaVersion             int      `json:"schema_version"`
 	AgentVersion              string   `json:"agent_version"`
@@ -283,12 +321,15 @@ func agentVersionFromRepoRoot(repoRoot string) (string, error) {
 		return version, nil
 	}
 
+	// A revision identity is marked so a later comparison can tell it apart
+	// from a source hash of the same tree rather than reading it as a
+	// different build.
 	if version, err := jjVersion(repoRoot); err == nil {
-		return version, nil
+		return revisionFallbackPrefix + version, nil
 	}
 
 	if version, err := gitVersion(repoRoot); err == nil {
-		return version, nil
+		return revisionFallbackPrefix + version, nil
 	}
 
 	return "", fmt.Errorf("cannot compute local agent version for %s", repoRoot)

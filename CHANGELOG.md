@@ -52,6 +52,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Edge diagnosis command classification**: `diagnose shadow` is classified as
   a mirrored read command; an unavailable edge view gets the standard view
   diagnostic instead of an unclassified-command error (wb175).
+- **Agent identity comparison**: An agent version that could not be hashed from
+  source is marked as a revision fallback and no longer judges a source-hash
+  deployment. A process that cannot compute the hash reports the host as
+  `unknown` and leaves its binary in place, instead of redeploying and
+  re-execing the runner on every dispatch pass.
 
 - **Artifact dependency failure isolation**: Confirmed missing or failed
   producer artifacts fail the rental consumer with a dependency diagnosis.

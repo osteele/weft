@@ -47,15 +47,32 @@ the queue protocol version, and how old each observation is.
 
 - `current` — desired, deployed, and running versions agree.
 - `stale` — a version was observed and it differs from the desired build.
-- `unknown` — nothing was observed, the observation is too old to trust, or the
-  desired version could not be computed. An unobserved host is not a
-  known-stale host, and the `DETAIL` column says which case applies.
+- `unknown` — nothing was observed, the observation is too old to trust, the
+  desired version could not be computed, or the two identities are not
+  comparable (see below). An unobserved host is not a known-stale host, and the
+  `DETAIL` column says which case applies.
 
 **The agent version is a content hash over `cmd/agent`'s transitive source
-closure** (`localAgentSourceVersion`, `internal/agentdeploy/version.go`), with
-the jj or git commit id as a fallback. So changing any package the agent
-imports — `internal/sync`, say — changes the desired version and triggers a
-redeploy, even when the resulting binary is byte-identical.
+closure** (`localAgentSourceVersion`, `internal/agentdeploy/version.go`). So
+changing any package the agent imports — `internal/sync`, say — changes the
+desired version and triggers a redeploy, even when the resulting binary is
+byte-identical.
+
+**An identity that could not be hashed is marked `vcs-`, and decides nothing.**
+The hash shells out to `go list`, which some processes cannot run — a launchd
+daemon with a different environment, say — so those fall back to naming the jj
+or git revision. That fallback disagrees with the source hash of the very tree
+it names, which is indistinguishable from an older build unless the kinds stay
+apart. They do: `AgentVersionKindOf` classifies an identity, and a `vcs-`
+identity facing a source-hash deployment yields "unknown" rather than "stale".
+`EnsureAgentUpToDate` then leaves the binary alone and `weft queue update`
+prints why nothing was deployed.
+
+Without that rule the weaker process overwrites a verified deployment and
+re-execs the runner on every dispatch pass. Observed on studio: a source-hash
+deploy verified as `ebcd26823c30` was replaced seventy seconds later by a
+native rebuild identifying itself as the stack head's commit id, after which
+`agent-status` reported the host stale indefinitely.
 
 **Do not verify a deployment by grepping the remote binary for strings.** Go's
 linker eliminates code that is unreachable from the binary's entry point, so a

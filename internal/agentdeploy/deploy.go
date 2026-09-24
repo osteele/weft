@@ -26,10 +26,47 @@ const remoteBinDir = "~/.cache/weft/bin"
 //     status line.
 //   - OnVerified receives the fingerprint after the installed binary has run
 //     and matched the desired build.
+//   - OnIndeterminate receives the local and remote identities when this
+//     process cannot judge the deployed binary, so the caller can say why
+//     nothing was deployed.
 type EnsureAgentOptions struct {
-	Output     io.Writer
-	OnProgress BuildProgressFunc
-	OnVerified func(version string)
+	Output          io.Writer
+	OnProgress      BuildProgressFunc
+	OnVerified      func(version string)
+	OnIndeterminate func(localVersion, remoteVersion string)
+}
+
+// agentDeployDecision is what a comparison of the local and remote agent
+// identities settles.
+type agentDeployDecision int
+
+const (
+	// agentDeployUpToDate: the host already runs this identity.
+	agentDeployUpToDate agentDeployDecision = iota
+	// agentDeployProceed: the local identity is authoritative and differs.
+	agentDeployProceed
+	// agentDeployIndeterminate: the identities are not comparable.
+	agentDeployIndeterminate
+)
+
+// decideAgentDeploy compares the identity this process can compute against the
+// one the host reports.
+//
+// A revision fallback cannot judge a source-hash deployment. The two name the
+// same tree differently, so reading the disagreement as staleness overwrites a
+// binary that was verified against its own source and re-execs the runner on
+// every pass — observed on studio, where a source-hash deploy was replaced by
+// a revision-identity rebuild seventy seconds later. Unknown is not stale: the
+// deployed binary stays, and the process that can hash the source decides.
+func decideAgentDeploy(localVer, remoteVer string) agentDeployDecision {
+	if localVer == remoteVer {
+		return agentDeployUpToDate
+	}
+	if AgentVersionKindOf(localVer) == AgentVersionRevisionFallback &&
+		AgentVersionKindOf(remoteVer) == AgentVersionSourceHash {
+		return agentDeployIndeterminate
+	}
+	return agentDeployProceed
 }
 
 // EnsureAgentUpToDate checks whether the remote agent is current, and if not,
@@ -70,9 +107,18 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 		return false, fmt.Errorf("remote agent version on %s: %w", host, err)
 	}
 
-	if localVer == remoteVer {
+	switch decideAgentDeploy(localVer, remoteVer) {
+	case agentDeployUpToDate:
 		if opts.OnVerified != nil {
 			opts.OnVerified(localVer)
+		}
+		return false, nil
+	case agentDeployIndeterminate:
+		slog.Warn("agent identity is not comparable; leaving the deployed binary in place",
+			"component", "agentdeploy", "host", host,
+			"local_version", localVer, "remote_version", remoteVer)
+		if opts.OnIndeterminate != nil {
+			opts.OnIndeterminate(localVer, remoteVer)
 		}
 		return false, nil
 	}

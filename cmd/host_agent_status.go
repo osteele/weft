@@ -153,6 +153,15 @@ func classifyHostAgentStatus(row hostAgentStatusRow, now time.Time) (string, str
 	if row.DesiredVersion == "" {
 		return "unknown", "desired agent version is unavailable"
 	}
+	// A revision fallback names the tree, not its bytes, so it disagrees with
+	// a source hash of the same tree. Reporting that as staleness would accuse
+	// a current host of running an old build because this process could not
+	// run `go list`.
+	if agentdeploy.AgentVersionKindOf(row.DesiredVersion) == agentdeploy.AgentVersionRevisionFallback &&
+		(agentdeploy.AgentVersionKindOf(row.RunningVersion) == agentdeploy.AgentVersionSourceHash ||
+			agentdeploy.AgentVersionKindOf(row.DeployedVersion) == agentdeploy.AgentVersionSourceHash) {
+		return "unknown", "desired agent version is a revision fallback and cannot be compared with a source-hash build"
+	}
 	if row.RunningVersion != row.DesiredVersion {
 		return "stale", "running agent differs from the desired build"
 	}

@@ -1070,6 +1070,7 @@ func updateQueueHost(cmd *cobra.Command, host string) error {
 	progress := func(phase string) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", host, phase)
 	}
+	var indeterminate string
 	deployed, err := agentdeploy.EnsureAgentUpToDateWithOptions(host, *spec, agentdeploy.EnsureAgentOptions{
 		Output:     cmd.ErrOrStderr(),
 		OnProgress: progress,
@@ -1078,13 +1079,22 @@ func updateQueueHost(cmd *cobra.Command, host string) error {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to cache verified agent: %v\n", err)
 			}
 		},
+		OnIndeterminate: func(localVersion, remoteVersion string) {
+			indeterminate = fmt.Sprintf(
+				"this weft could only compute the revision identity %s, which cannot judge the deployed source build %s; "+
+					"deploy from a checkout where `go list` runs to change the binary",
+				localVersion, remoteVersion)
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("deploy agent on %s: %w", host, err)
 	}
-	if deployed {
+	switch {
+	case deployed:
 		fmt.Printf("%s: agent binary updated\n", host)
-	} else {
+	case indeterminate != "":
+		fmt.Printf("%s: agent binary left in place: %s\n", host, indeterminate)
+	default:
 		fmt.Printf("%s: agent binary already up-to-date\n", host)
 	}
 

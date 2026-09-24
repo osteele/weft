@@ -76,6 +76,46 @@ func TestClassifyHostAgentStatusFreshRunningSkewOutweighsMissingDeploymentObserv
 	}
 }
 
+// A weft process that cannot hash the agent source falls back to a revision
+// identity, which disagrees with the source hash of the very tree it names.
+// Reporting that as staleness accuses a current host of running an old build.
+func TestClassifyHostAgentStatusRevisionFallbackCannotJudgeSourceBuild(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	for _, tc := range []struct {
+		name                        string
+		deployed, running           string
+		wantStatus, wantReasonMatch string
+	}{
+		{
+			name: "running is a source hash", deployed: "vcs-78ce3e6cd135", running: "ebcd26823c30",
+			wantStatus: "unknown", wantReasonMatch: "revision fallback",
+		},
+		{
+			name: "deployed is a source hash", deployed: "ebcd26823c30", running: "vcs-78ce3e6cd135",
+			wantStatus: "unknown", wantReasonMatch: "revision fallback",
+		},
+		{
+			name: "every identity is a revision", deployed: "vcs-78ce3e6cd135", running: "vcs-78ce3e6cd135",
+			wantStatus: "current", wantReasonMatch: "agree",
+		},
+		{
+			name: "revision identities genuinely differ", deployed: "vcs-78ce3e6cd135", running: "vcs-0008db9dc5f2",
+			wantStatus: "stale", wantReasonMatch: "running agent differs",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, reason := classifyHostAgentStatus(hostAgentStatusRow{
+				DesiredVersion: "vcs-78ce3e6cd135", DeployedVersion: tc.deployed, RunningVersion: tc.running,
+				QueueProtocolVersion: opsqueue.QueueProtocolVersion,
+				RunningObservedAt:    990,
+			}, now)
+			if status != tc.wantStatus || !strings.Contains(reason, tc.wantReasonMatch) {
+				t.Fatalf("status=%q reason=%q, want %q containing %q", status, reason, tc.wantStatus, tc.wantReasonMatch)
+			}
+		})
+	}
+}
+
 func TestWriteHostAgentStatusJSONPublishesVersionedEvidence(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	rows := []hostAgentStatusRow{{
