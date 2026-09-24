@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -71,14 +73,69 @@ const createInstanceJSON = `{
   "success": true
 }`
 
+// stubProbeFlag asks a stub to exit immediately without doing its job, so the
+// helper can confirm the file is executable without consuming the single
+// response most stubs are written to give.
+const stubProbeFlag = "--weft-stub-probe"
+
+// writeExecutableStub publishes an executable stub at path and does not return
+// until the kernel will actually exec it.
+//
+// Writing the file is not enough. These tests run in parallel and each one
+// forks a child, and a child forked between this write's open and close
+// inherits the write descriptor until its own exec clears it. For that window
+// the kernel refuses to exec the file with ETXTBSY, which is the CI failure
+// this guards: "fork/exec .../vastai: text file busy", seen on
+// TestSearchOffersPostFiltersMinCUDA and
+// TestCreateInstanceSuccessWithoutContractIDIsProviderRejected across four
+// scheduled runs. Writing to a temporary name and renaming does not help — the
+// inherited descriptor and the new name refer to the same inode.
+//
+// The window is a forked child's fork-to-exec gap, so it closes on its own in
+// microseconds. Probing here rather than retrying inside the client keeps the
+// wait in the fixture, where the race is, instead of teaching production code
+// to expect its own CLI to be half-written.
 func writeExecutableStub(t *testing.T, path, script string) {
 	t.Helper()
 	pending := path + ".tmp"
-	if err := os.WriteFile(pending, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(pending, []byte(probeGuardedScript(script)), 0o755); err != nil {
 		t.Fatalf("write executable stub: %v", err)
 	}
 	if err := os.Rename(pending, path); err != nil {
 		t.Fatalf("publish executable stub: %v", err)
+	}
+	if err := waitUntilExecutable(path, 10*time.Second); err != nil {
+		t.Fatalf("stub never became executable: %v", err)
+	}
+}
+
+// probeGuardedScript prefixes a stub with an early exit for the probe flag,
+// after its shebang so the interpreter still resolves. A stub only sees the
+// flag from waitUntilExecutable, so its recorded arguments and its single
+// response are unaffected.
+func probeGuardedScript(script string) string {
+	guard := "case \"$1\" in " + stubProbeFlag + ") exit 0;; esac\n"
+	shebang, rest, found := strings.Cut(script, "\n")
+	if !found || !strings.HasPrefix(shebang, "#!") {
+		return guard + script
+	}
+	return shebang + "\n" + guard + rest
+}
+
+// waitUntilExecutable execs the stub until the kernel stops reporting ETXTBSY.
+// Any other outcome — including a non-zero exit — means the file is executable,
+// which is all this establishes.
+func waitUntilExecutable(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for attempt := 0; ; attempt++ {
+		err := exec.Command(path, stubProbeFlag).Run()
+		if !errors.Is(err, syscall.ETXTBSY) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s still busy after %s and %d attempts: %w", path, timeout, attempt+1, err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
