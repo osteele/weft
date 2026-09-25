@@ -934,8 +934,21 @@ contract BindingPathsAreExhaustive {
         --   retry / replan: job-lifecycle re-placement, re-entering
         --     evaluation with constraints assembled at that decision
         --   explicit_host: ExplicitHostBypassesPolicyNotCompatibility
-        --   job_move: job-move.allium (moving a placed job to another host
-        --     is a re-binding and re-enters evaluation)
+        --   launch_prefilter: placement.PrefilterOnPrem
+        --     (internal/placement/onprem_prefilter.go, reached from
+        --     cmd/instance_launch.go) — writes jobs.host for cloud-launch
+        --     jobs before the rental launch
+        --   overload_drain / rental_onprem_rebalance: re-placement passes
+        --     (internal/orchestration/overload_drain.go,
+        --     rental_onprem_rebalance.go) that re-enter evaluation
+        --   job_move: job-move.allium — STATUS: NAMED GAP. The shipped
+        --     mover (cmd/job.go moveJobsToHost ->
+        --     orchestration.MoveJobsToHost -> db.UpdateJobHost) supersedes
+        --     prior intents and writes the host WITHOUT an eligibility
+        --     pass. The binding obligation is not yet honored on this
+        --     path; routing it through evaluation is open work, to be
+        --     pinned by the coverage test the way
+        --     TestKnownConstraintSystemGaps pins deliberate holes.
         -- A path that writes jobs.host or claims an instance without
         -- routing through evaluation violates this contract. The coverage
         -- test counterpart should enumerate these paths the way
@@ -1030,12 +1043,28 @@ rule EvaluateEligibility {
     -- error output.
 
     -- 0a. Cordoned targets take no new auto-placed work. (weft instance
-    --     cordon / host-level cordon.) The explicitly_named exception below
-    --     scopes the override to operator-forced --host targeting and is
-    --     audited; auto-placed work (including campaign-lifecycle's
-    --     placement pass, which states its own unconditional cordon rule)
-    --     never receives it.
-    requires: target.explicitly_named or not target.cordoned
+    --     cordon / host-level cordon.) Two cordon kinds exist and the gate
+    --     treats them differently for explicit --host targeting:
+    --       * OPERATOR cordons (set by hand, reason-tagged) may be
+    --         overridden by an explicitly-named --host submission, with an
+    --         audit event naming the override (see
+    --         ExplicitHostBypassesPolicyNotCompatibility).
+    --       * AUTOMATIC health cordons (e.g. the source-sync wedge cordon
+    --         in ops/source_sync_health.go, whose drain re-places queued
+    --         jobs and depends on this gate holding) are NEVER overridable:
+    --         if the flag were honored there, drained jobs would bounce
+    --         straight back onto the wedged host.
+    --     Auto-placed work (including campaign-lifecycle's placement pass,
+    --     which states its own unconditional cordon rule) never receives
+    --     either exception.
+    --     WRITE-BOUNDARY NOTE: db.AssignJobHost refuses cordoned targets
+    --     unconditionally today, and ExplicitlyNamed is not yet set by any
+    --     caller — the audited explicit-override branch at the write
+    --     boundary is part of this rule's open work: either the override
+    --     stays limited to submit-time host writes, or AssignJobHost gains
+    --     the audited branch with a recorded placement reason on refusal.
+    requires: (target.explicitly_named
+        and PolicyOverrideAudited(job, target)) or not target.cordoned
 
     -- 0b. Overloaded hosts are ineligible; merely busy hosts stay eligible
     --     with a scoring penalty. Implementation: placement.AssessHostLoad —
